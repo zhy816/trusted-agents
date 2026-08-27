@@ -43,6 +43,52 @@ export class TransportError extends TrustedAgentError {
 	}
 }
 
+/**
+ * A peer replied with a structured JSON-RPC error envelope. Preserves the
+ * numeric code and machine-readable `error.data` that a bare TransportError
+ * would strip — senders need both to react to codes like -32050.
+ */
+export class TransportRpcError extends TransportError {
+	constructor(
+		message: string,
+		public readonly rpcCode: number,
+		public readonly rpcData?: unknown,
+	) {
+		super(message);
+		this.name = "TransportRpcError";
+	}
+}
+
+export const ATTENTION_PAYMENT_REQUIRED_CODE = -32050;
+
+/**
+ * Machine-readable quote carried in the `error.data` of a -32050 rejection.
+ * Structurally identical to the registration file's advertised
+ * `trustedAgentProtocol.attention` block (x402 semantics over XMTP).
+ */
+export interface AttentionQuote {
+	version: string;
+	currency: string;
+	chain?: string;
+	pricing: Record<string, string>;
+}
+
+/**
+ * Thrown by the receiving service when attention enforcement rejects an
+ * inbound request; the transport maps it to a JSON-RPC -32050 error with
+ * the quote in `error.data` instead of the generic -32603.
+ */
+export class AttentionPaymentRequiredError extends TrustedAgentError {
+	readonly rpcCode = ATTENTION_PAYMENT_REQUIRED_CODE;
+	constructor(
+		message: string,
+		public readonly quote: AttentionQuote,
+	) {
+		super(message, "ATTENTION_PAYMENT_REQUIRED");
+		this.name = "AttentionPaymentRequiredError";
+	}
+}
+
 export class ConfigError extends TrustedAgentError {
 	constructor(message: string) {
 		super(message, "CONFIG_ERROR");

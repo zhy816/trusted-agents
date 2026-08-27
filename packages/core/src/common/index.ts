@@ -5,8 +5,12 @@ export {
 	ConnectionError,
 	PermissionError,
 	TransportError,
+	TransportRpcError,
 	ConfigError,
 	ValidationError,
+	AttentionPaymentRequiredError,
+	ATTENTION_PAYMENT_REQUIRED_CODE,
+	type AttentionQuote,
 	toErrorMessage,
 	fsErrorCode,
 } from "./errors.js";

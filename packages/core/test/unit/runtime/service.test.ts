@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, expect, it, vi } from "vitest";
 import { TapAppRegistry } from "../../../src/app/registry.js";
-import { TransportError, ValidationError } from "../../../src/common/errors.js";
+import {
+	AttentionPaymentRequiredError,
+	TransportError,
+	ValidationError,
+} from "../../../src/common/errors.js";
 import type { TrustedAgentsConfig } from "../../../src/config/types.js";
 import {
 	buildConnectionRequest,
@@ -20,6 +24,7 @@ import { createEmptyPermissionState, createGrantSet } from "../../../src/permiss
 import {
 	buildOutgoingActionRequest,
 	buildOutgoingActionResult,
+	buildOutgoingMessageRequest,
 	parseTransferActionRequest,
 	parseTransferActionResponse,
 } from "../../../src/runtime/index.js";
@@ -265,6 +270,7 @@ async function createService(
 			ConstructorParameters<typeof TapMessagingService>[1],
 			"hooks" | "ownerLabel"
 		>;
+		configOverrides?: Partial<TrustedAgentsConfig>;
 	} = {},
 ): Promise<{
 	service: TapMessagingService;
@@ -284,6 +290,7 @@ async function createService(
 		inviteExpirySeconds: 3600,
 		resolveCacheTtlMs: 60_000,
 		resolveCacheMaxEntries: 128,
+		...(dependencies.configOverrides ?? {}),
 	};
 	const requestJournal = new FileRequestJournalImpl(dataDir);
 	const transport = dependencies.transport ?? new FakeTransport(options);
@@ -4100,5 +4107,144 @@ describe("TapMessagingService", () => {
 
 			await service.stop();
 		});
+	});
+});
+
+describe("attention enforcement", () => {
+	const ATTENTION_CONFIG = {
+		attention: { enforce: true, pricing: { grantHolder: "0", standard: "0.001" } },
+	};
+
+	function inboundMessage(contact: Contact, text = "hello"): ProtocolMessage {
+		return buildOutgoingMessageRequest(contact, text);
+	}
+
+	it("rejects un-granted inbound message/send with a quoted -32050 error", async () => {
+		const contact = makeActiveContact("conn-attn-1");
+		const { service, transport, requestJournal } = await createService(
+			{},
+			{
+				trustStore: createMemoryTrustStore([contact]),
+				configOverrides: ATTENTION_CONFIG,
+			},
+		);
+		await service.start();
+		try {
+			const message = inboundMessage(contact);
+			const injection = transport.handlers.onRequest?.({
+				from: contact.peerAgentId,
+				senderInboxId: "peer-inbox-attn",
+				message,
+			});
+			await expect(injection).rejects.toThrow(AttentionPaymentRequiredError);
+			await expect(injection).rejects.toMatchObject({
+				rpcCode: -32050,
+				quote: {
+					version: "1.0",
+					currency: "USDC",
+					chain: "eip155:8453",
+					pricing: { grantHolder: "0", standard: "0.001" },
+				},
+			});
+
+			// The journal entry is completed before the throw so full-history
+			// replays take the duplicate short-circuit instead of re-running
+			// enforcement.
+			const entry = await requestJournal.getByRequestId(String(message.id));
+			expect(entry?.status).toBe("completed");
+			await expect(
+				transport.handlers.onRequest?.({
+					from: contact.peerAgentId,
+					senderInboxId: "peer-inbox-attn",
+					message,
+				}),
+			).resolves.toEqual({ status: "duplicate" });
+		} finally {
+			await service.stop();
+		}
+	});
+
+	it("exempts senders holding an active message/send grant", async () => {
+		const contact = makeActiveContact("conn-attn-2");
+		contact.permissions.grantedByMe = createGrantSet(
+			[{ grantId: "grant-msg-1", scope: "message/send" }],
+			"2026-03-08T00:00:00.000Z",
+		);
+		const { service, transport } = await createService(
+			{},
+			{
+				trustStore: createMemoryTrustStore([contact]),
+				configOverrides: ATTENTION_CONFIG,
+			},
+		);
+		await service.start();
+		try {
+			await expect(
+				transport.handlers.onRequest?.({
+					from: contact.peerAgentId,
+					senderInboxId: "peer-inbox-attn",
+					message: inboundMessage(contact),
+				}),
+			).resolves.toEqual({ status: "received" });
+		} finally {
+			await service.stop();
+		}
+	});
+
+	it("does not enforce when attention.enforce is off (default)", async () => {
+		const contact = makeActiveContact("conn-attn-3");
+		const { service, transport } = await createService(
+			{},
+			{ trustStore: createMemoryTrustStore([contact]) },
+		);
+		await service.start();
+		try {
+			await expect(
+				transport.handlers.onRequest?.({
+					from: contact.peerAgentId,
+					senderInboxId: "peer-inbox-attn",
+					message: inboundMessage(contact),
+				}),
+			).resolves.toEqual({ status: "received" });
+		} finally {
+			await service.stop();
+		}
+	});
+
+	it("waits for the receipt only when the peer advertises pricing", async () => {
+		const contact = makeActiveContact("conn-attn-4");
+		const pricedPeer: ResolvedAgent = {
+			...PEER_AGENT,
+			attention: { version: "1.0", currency: "USDC", pricing: { standard: "0.001" } },
+		};
+		const { service, transport } = await createService(
+			{},
+			{
+				trustStore: createMemoryTrustStore([contact]),
+				resolver: createStaticResolver(pricedPeer),
+			},
+		);
+		await service.start();
+		try {
+			await service.sendMessage("Bob", "hi");
+			expect(transport.sentMessages[0]?.options?.waitForAck).toBe(true);
+		} finally {
+			await service.stop();
+		}
+	});
+
+	it("keeps fire-and-forget sends for peers without pricing", async () => {
+		const contact = makeActiveContact("conn-attn-5");
+		const { service, transport } = await createService(
+			{},
+			{ trustStore: createMemoryTrustStore([contact]) },
+		);
+		await service.start();
+		try {
+			await service.sendMessage("Bob", "hi");
+			expect(transport.sentMessages[0]?.options?.waitForAck).toBe(false);
+		} finally {
+			await service.stop();
+		}
 	});
 });

@@ -7,6 +7,8 @@ import type { TapActionContext, TapActionResult } from "../app/types.js";
 import { defineTapApp } from "../app/types.js";
 import {
 	AsyncMutex,
+	AttentionPaymentRequiredError,
+	type AttentionQuote,
 	PermissionError,
 	TransportError,
 	TrustedAgentError,
@@ -1317,12 +1319,16 @@ export class TapMessagingService {
 			const contact = await this.requireActiveContact(peer);
 			const request = buildOutgoingMessageRequest(contact, text, scope, options);
 			const timestamp = nowISO();
-			// Fire-and-forget: a one-shot peer that isn't running `tap message
-			// listen` during the publish window would otherwise turn a
-			// successful XMTP publication into a local timeout.
+			// Fire-and-forget by default: a one-shot peer that isn't running
+			// `tap message listen` during the publish window would otherwise
+			// turn a successful XMTP publication into a local timeout. When the
+			// peer advertises attention pricing, though, it may reject with a
+			// -32050 quote — wait for the receipt so that rejection reaches the
+			// caller instead of being silently dropped.
+			const waitForAck = await this.peerAdvertisesAttentionPricing(contact);
 			const receipt = await this.context.transport.send(contact.peerAgentId, request, {
 				peerAddress: contact.peerAgentAddress,
-				waitForAck: false,
+				waitForAck,
 			});
 
 			await this.appendConversationLogSafe(contact, request, "outgoing", timestamp);
@@ -2452,6 +2458,41 @@ export class TapMessagingService {
 		return parseRecordedTransferResponse(entry?.metadata);
 	}
 
+	/**
+	 * The quote a rejected sender receives in `error.data` of a -32050:
+	 * this agent's advertised price list (mirrors the registration file's
+	 * `trustedAgentProtocol.attention` block). An empty pricing map is
+	 * legal — enforcement without published prices means "granted peers
+	 * only".
+	 */
+	private buildAttentionQuote(): AttentionQuote {
+		return {
+			version: "1.0",
+			currency: "USDC",
+			chain: this.context.config.chain,
+			pricing: this.context.config.attention?.pricing ?? {},
+		};
+	}
+
+	/**
+	 * True when the peer's (cached) registration file advertises a non-empty
+	 * attention price list. Resolution failures never block a send — the
+	 * fire-and-forget default is the fallback.
+	 */
+	private async peerAdvertisesAttentionPricing(contact: Contact): Promise<boolean> {
+		try {
+			const resolved = await this.context.resolver.resolveWithCache(
+				contact.peerAgentId,
+				contact.peerChain,
+				this.context.config.resolveCacheTtlMs,
+			);
+			const pricing = resolved.attention?.pricing;
+			return pricing !== undefined && Object.keys(pricing).length > 0;
+		} catch {
+			return false;
+		}
+	}
+
 	private async onRequest(envelope: {
 		from: number;
 		senderInboxId: string;
@@ -2543,6 +2584,24 @@ export class TapMessagingService {
 			return this.emitIncomingAndReturn(envelope, claimed.duplicate ? "duplicate" : "received", {
 				fromName: contact.peerDisplayName,
 			});
+		}
+
+		// Attention enforcement (message/send only): with `attention.enforce`
+		// on, a sender holding no active "message/send" grant from us is
+		// rejected with a machine-readable quote BEFORE the message reaches
+		// the conversation log or the notification pipeline — a rejected
+		// message must cost this agent's LLM nothing. The journal entry is
+		// marked completed first so full-history syncs replay the duplicate
+		// short-circuit instead of re-running enforcement per replay.
+		if (envelope.message.method === MESSAGE_SEND && this.context.config.attention?.enforce) {
+			const grants = findActiveGrantsByScope(contact.permissions.grantedByMe, MESSAGE_SEND);
+			if (grants.length === 0) {
+				await this.context.requestJournal.updateStatus(String(envelope.message.id), "completed");
+				throw new AttentionPaymentRequiredError(
+					`attention payment required: no active ${MESSAGE_SEND} grant for agent #${envelope.from}`,
+					this.buildAttentionQuote(),
+				);
+			}
 		}
 
 		await this.appendConversationLogSafe(contact, envelope.message, "incoming");
