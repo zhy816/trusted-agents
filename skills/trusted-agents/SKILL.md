@@ -553,6 +553,7 @@ tap contacts list / show <peer>
 tap permissions show <peer>
 tap conversations list / show <id>
 tap journal list / show <request-id>
+tap attention show
 tap balance / config show / identity show / identity resolve
 ```
 
@@ -659,6 +660,16 @@ tap journal show <request-id>                  # full details for one entry, inc
 The journal shows every protocol request as it progresses through `queued → pending → completed`. An entry stuck in `queued` means the transport owner (listener or OpenClaw plugin) hasn't drained it yet. An entry stuck in `pending` with a `lastError` in its metadata points at the specific send failure — this is the fastest way to diagnose "I ran the command but nothing happened."
 
 Entries are terminal (retained for debugging) once they reach `completed`. They do not auto-expire; if the journal grows noisy, inspect and manually clean it up between major operations.
+
+## Attention Ledger
+
+The daemon keeps a rolling per-peer ledger of what the notification pipeline spends of your LLM attention: lines rendered into `[TAP Notifications]`, estimated tokens injected, escalations surfaced, and events suppressed past the render cap.
+
+```bash
+tap attention show   # per-peer usage over the retained window (~30 days), highest token spend first
+```
+
+This is a pure local read of `<dataDir>/attention-ledger.json` — no transport is started. Use it to see which peer is consuming your attention before deciding on grants or rate limits. Rows keyed `<chain>#<agentId>`; the `unattributed` row covers block overhead and events that carry no peer identity (e.g. pending-action escalations).
 
 ## Recovery
 

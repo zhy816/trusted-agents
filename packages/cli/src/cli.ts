@@ -784,6 +784,20 @@ Examples:
 			await journalShowCommand(requestId, opts);
 		});
 
+	// attention
+	const attention = program
+		.command("attention")
+		.description("Inspect the notification attention ledger");
+
+	attention
+		.command("show")
+		.description("Per-peer notification attention usage (local read, no transport)")
+		.action(async () => {
+			const opts = program.opts<GlobalOptions>();
+			const { attentionShowCommand } = await import("./commands/attention-show.js");
+			await attentionShowCommand(opts);
+		});
+
 	// app
 	const app = program.command("app").description("Manage TAP apps");
 
