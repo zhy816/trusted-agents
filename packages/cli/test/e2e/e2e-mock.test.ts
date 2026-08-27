@@ -773,6 +773,177 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 		});
 	});
 
+	// ── Phase 7: Prepaid postage ──────────────────────────────────────────────
+
+	describe("Phase 7: Prepaid postage", () => {
+		let topupCreditId: string | undefined;
+
+		// Delivery in this phase is asserted through B's issued postage ledger,
+		// not B's conversation log: the debit happens on B only after
+		// enforcement accepted the stamp (the point of this phase), while the
+		// mock runtime's legacy file conversation logger is invisible to the
+		// CLI's SQLite-backed conversations commands after their one-shot
+		// migration — even Phase 6's granted ping never shows up there.
+		async function issuedLedgerB(): Promise<
+			Array<{ credit_id: string; spent: string; remaining: string; last_seq: number }>
+		> {
+			const balance = await runCli(["--json", "--data-dir", agentBDir, "postage", "balance"]);
+			return (
+				parseJsonOutput(balance.stdout).data as {
+					issued: Array<{ credit_id: string; spent: string; remaining: string; last_seq: number }>;
+				}
+			).issued;
+		}
+
+		it(SCENARIOS.POSTAGE_REVOKE_EXEMPTION.name, async () => {
+			// Phase 6 left Agent A holding a message/send grant from B. Revoke
+			// it so postage is the only way A's messages buy attention again.
+			const revoke = await runCli([
+				"--plain",
+				"--data-dir",
+				agentBDir,
+				"permissions",
+				"revoke",
+				AGENT_A_NAME,
+				"--grant-id",
+				"e2e-message-send",
+			]);
+			expect(revoke.exitCode, `revoke failed:\n${revoke.stderr}`).toBe(0);
+
+			// A's runtime must see the revocation before it decides whether to
+			// stamp — auto-stamping consults A's grantedByPeer view.
+			await waitForPermissionsMock(agentADir, AGENT_B_NAME, (snapshot) =>
+				snapshot.granted_by_peer.grants.some(
+					(grant) => grant.grantId === "e2e-message-send" && grant.status === "revoked",
+				),
+			);
+		});
+
+		it(SCENARIOS.POSTAGE_TOPUP.name, async () => {
+			const result = await runCli([
+				"--json",
+				"--data-dir",
+				agentADir,
+				"postage",
+				"topup",
+				AGENT_B_NAME,
+				"--amount",
+				"0.002",
+				"--yes",
+			]);
+			expect(result.exitCode, `postage topup failed:\n${result.stderr}`).toBe(0);
+
+			const data = parseJsonOutput(result.stdout).data as {
+				status: string;
+				credit_id: string;
+				tx_hash: string;
+				certificate_verified: boolean;
+			};
+			expect(data.status).toBe("accepted");
+			expect(data.certificate_verified).toBe(true);
+			expect(data.credit_id).toBeTruthy();
+			expect(data.tx_hash).toBeTruthy();
+			topupCreditId = data.credit_id;
+
+			// Both sides recorded the credit: A holds it, B issued it.
+			const balanceA = await runCli(["--json", "--data-dir", agentADir, "postage", "balance"]);
+			const heldA = (
+				parseJsonOutput(balanceA.stdout).data as {
+					held: Array<{ credit_id: string; remaining: string }>;
+				}
+			).held;
+			expect(heldA).toMatchObject([{ credit_id: data.credit_id, remaining: "0.002" }]);
+
+			const balanceB = await runCli(["--json", "--data-dir", agentBDir, "postage", "balance"]);
+			const issuedB = (
+				parseJsonOutput(balanceB.stdout).data as {
+					issued: Array<{ credit_id: string; remaining: string }>;
+				}
+			).issued;
+			expect(issuedB).toMatchObject([{ credit_id: data.credit_id, remaining: "0.002" }]);
+		});
+
+		it(SCENARIOS.POSTAGE_STAMPED_SEND.name, async () => {
+			const result = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"stamped ping",
+			]);
+			expect(result.exitCode, `stamped send failed:\n${result.stderr}`).toBe(0);
+			expect(result.stdout).toContain("Sent:      true");
+
+			// B accepted the stamp and debited the issued credit — the debit
+			// only happens after enforcement let the message through.
+			expect(await issuedLedgerB()).toMatchObject([
+				{ credit_id: topupCreditId, spent: "0.001", remaining: "0.001", last_seq: 1 },
+			]);
+		});
+
+		it(SCENARIOS.POSTAGE_EXHAUSTED.name, async () => {
+			// Second stamp drains the 0.002 credit...
+			const second = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"stamped ping two",
+			]);
+			expect(second.exitCode, `second stamped send failed:\n${second.stderr}`).toBe(0);
+
+			// ...so the third send goes out unstamped and B rejects it with the
+			// machine-readable top-up quote.
+			const third = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"over budget ping",
+			]);
+			expect(third.exitCode, "exhausted send must be rejected").not.toBe(0);
+			expect(`${third.stdout}\n${third.stderr}`).toContain("attention payment required");
+
+			// The rejected message consumed nothing on B: the ledger still
+			// shows exactly the two accepted stamps.
+			expect(await issuedLedgerB()).toMatchObject([
+				{ credit_id: topupCreditId, spent: "0.002", remaining: "0", last_seq: 2 },
+			]);
+		});
+
+		it(SCENARIOS.POSTAGE_BALANCE.name, async () => {
+			const balanceA = await runCli([
+				"--json",
+				"--data-dir",
+				agentADir,
+				"postage",
+				"balance",
+				"--peer",
+				AGENT_B_NAME,
+			]);
+			const dataA = parseJsonOutput(balanceA.stdout).data as {
+				held: Array<{ credit_id: string; remaining: string; next_seq: number }>;
+				issued: unknown[];
+			};
+			expect(dataA.held).toMatchObject([{ credit_id: topupCreditId, remaining: "0", next_seq: 3 }]);
+			expect(dataA.issued).toEqual([]);
+
+			const balanceB = await runCli(["--json", "--data-dir", agentBDir, "postage", "balance"]);
+			const dataB = parseJsonOutput(balanceB.stdout).data as {
+				issued: Array<{ credit_id: string; spent: string; last_seq: number }>;
+			};
+			expect(dataB.issued).toMatchObject([
+				{ credit_id: topupCreditId, spent: "0.002", last_seq: 2 },
+			]);
+		});
+	});
+
 	// ═══════════════════════════════════════════════════════
 	// Edge case: wipe-and-recover (spec §3.1.1 recovery)
 	// ═══════════════════════════════════════════════════════

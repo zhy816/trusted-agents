@@ -6,6 +6,7 @@ export const PHASES = {
 	MESSAGING: 4,
 	TRANSFERS: 5,
 	ATTENTION: 6,
+	POSTAGE: 7,
 } as const;
 
 export const SCENARIOS = {
@@ -80,5 +81,30 @@ export const SCENARIOS = {
 	ATTENTION_GRANT_EXEMPT: {
 		name: "message/send grant exempts sender (A to B delivers)",
 		phase: PHASES.ATTENTION,
+	},
+
+	// Phase 7: Prepaid postage. Mock-only for the same reasons as Phase 6:
+	// enforcement (and therefore stamping) is opt-in, and the exhaustion
+	// scenario relies on the negative "B never logged it" assertion that is
+	// timing-flaky over real XMTP. Mirror into e2e-live with a funded run.
+	POSTAGE_REVOKE_EXEMPTION: {
+		name: "Revoke message/send grant so postage applies again (Agent B)",
+		phase: PHASES.POSTAGE,
+	},
+	POSTAGE_TOPUP: {
+		name: "Postage topup buys prepaid credit with a signed certificate (A at B)",
+		phase: PHASES.POSTAGE,
+	},
+	POSTAGE_STAMPED_SEND: {
+		name: "Auto-stamped message from un-granted sender delivers and debits (A to B)",
+		phase: PHASES.POSTAGE,
+	},
+	POSTAGE_EXHAUSTED: {
+		name: "Exhausted postage credit is rejected with a top-up quote (A to B)",
+		phase: PHASES.POSTAGE,
+	},
+	POSTAGE_BALANCE: {
+		name: "Postage balance shows held and issued credits (both agents)",
+		phase: PHASES.POSTAGE,
 	},
 } as const;
