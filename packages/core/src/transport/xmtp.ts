@@ -760,7 +760,7 @@ export class XmtpTransport implements TransportProvider {
 					message.id,
 					error.rpcCode,
 					error.message,
-					{ attention: error.quote },
+					{ attention: error.quote, ...(error.postage ? { postage: error.postage } : {}) },
 				);
 				return false;
 			}

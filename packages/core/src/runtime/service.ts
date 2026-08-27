@@ -10,6 +10,7 @@ import {
 	AttentionPaymentRequiredError,
 	type AttentionQuote,
 	PermissionError,
+	type PostageRejection,
 	TransportError,
 	TrustedAgentError,
 	ValidationError,
@@ -36,6 +37,22 @@ import {
 import type { ResolvedAgent } from "../identity/types.js";
 import { createEmptyPermissionState, createGrantSet } from "../permissions/index.js";
 import type { PermissionGrantSet } from "../permissions/types.js";
+import { isValidPostageAmount, postageAmountToMicros } from "../postage/amounts.js";
+import { signPostageCredit, verifyPostageCredit } from "../postage/certificate.js";
+import {
+	POSTAGE_APP_ID,
+	type PostageAppExtension,
+	handlePostageBalance,
+	handlePostageTopup,
+} from "../postage/handlers.js";
+import { FilePostageLedger, postagePeerKey } from "../postage/ledger.js";
+import {
+	POSTAGE_TOPUP_ACTION,
+	type PostageTopupRequest,
+	buildPostageTopupPayload,
+	extractPostageStamp,
+	parsePostageTopupResponse,
+} from "../postage/payload.js";
 import { extractConnectionIdFromParams } from "../protocol/messages.js";
 import {
 	ACTION_REQUEST,
@@ -53,6 +70,7 @@ import type {
 	ConnectionRevokeParams,
 	MessageSendParams,
 	PermissionsUpdateParams,
+	PostageStamp,
 	TextPart,
 } from "../protocol/types.js";
 import {
@@ -332,6 +350,17 @@ export interface TapServiceHooks {
 		config: TrustedAgentsConfig,
 		request: TransferActionRequest,
 	) => Promise<{ txHash: `0x${string}` }>;
+	/**
+	 * Verify an inbound `postage/topup`'s claimed on-chain payment before a
+	 * credit is opened. Absent = accept the claimed txHash (the topup is
+	 * still bound to it in the credit record and certificate); hosts that
+	 * can query the chain plug real verification in here.
+	 */
+	verifyPostageTopup?: (
+		config: TrustedAgentsConfig,
+		request: PostageTopupRequest,
+		peerKey: string,
+	) => Promise<boolean>;
 	appendLedgerEntry?: (dataDir: string, entry: PermissionLedgerEntry) => Promise<string>;
 	log?: (level: "info" | "warn" | "error", message: string) => void;
 	emitEvent?: (payload: Record<string, unknown>) => void;
@@ -432,6 +461,35 @@ export interface TapRequestFundsResult {
 	asyncResult?: TransferActionResponse;
 }
 
+export interface TapPostageTopupInput {
+	/** Decimal USDC amount to prepay, ≤6 decimals. */
+	amount: string;
+	/** How long to wait for the peer's credit certificate. */
+	waitMs?: number;
+}
+
+export interface TapPostageTopupResult {
+	/**
+	 * accepted: the peer opened the credit (certificate may still be absent
+	 * if its signer was unavailable). pending: paid, but the request send
+	 * failed or no answer arrived within waitMs — the credit is recorded
+	 * locally and the retry path is idempotent on the receiver. rejected:
+	 * the peer refused; the on-chain payment already happened, so txHash is
+	 * the recovery handle.
+	 */
+	status: "accepted" | "pending" | "rejected";
+	/** Absent when the request send itself failed after payment. */
+	receipt?: TransportReceipt;
+	creditId: string;
+	amount: string;
+	txHash: `0x${string}`;
+	peerName: string;
+	peerAgentId: number;
+	certificate?: `0x${string}`;
+	certificateVerified: boolean;
+	error?: string;
+}
+
 export interface TapRequestMeetingInput {
 	peer: string;
 	proposal: SchedulingProposal;
@@ -494,6 +552,12 @@ export class TapMessagingService {
 	 */
 	private readonly inFlightConnectWaiters = new Map<string, ConnectWaiter>();
 	private readonly schedulingHandler: SchedulingHandler | undefined;
+	/**
+	 * Prepaid postage credits for this data dir. One instance per service:
+	 * attention enforcement debits and the postage app's topups go through
+	 * the same AsyncMutex, so a topup can never race a debit.
+	 */
+	private readonly postageLedger: FilePostageLedger;
 	private readonly handlers: TransportHandlers;
 	private running = false;
 	private lastSyncAt: string | undefined;
@@ -511,6 +575,7 @@ export class TapMessagingService {
 		this.ownerLock = new TransportOwnerLock(context.config.dataDir, this.ownerLabel);
 		this.outboxPollIntervalMs = options.outboxPollIntervalMs ?? OUTBOX_POLL_INTERVAL_MS;
 		this.schedulingHandler = options.schedulingHandler;
+		this.postageLedger = new FilePostageLedger(context.config.dataDir);
 		this.handlers = {
 			onRequest: async (envelope) => await this.onRequest(envelope),
 			onResult: async (envelope) => await this.onResult(envelope),
@@ -569,6 +634,25 @@ export class TapMessagingService {
 							return this.handleSchedulingAction(ctx);
 						},
 					},
+				},
+			}),
+		);
+
+		// Register the postage app inline. Unlike tap-transfer/scheduling, its
+		// action types are NOT special-cased in onRequest: dispatch flows
+		// through the generic dispatchToApp path, which injects the postage
+		// extension (ledger + signing adapters) the handlers run on. The
+		// packaged form (`@trustedagents/app-postage`) wraps the exact same
+		// handler functions for manifest-installed hosts.
+		this.context.appRegistry.registerApp(
+			defineTapApp({
+				id: POSTAGE_APP_ID,
+				name: "Postage",
+				version: "1.0.0",
+				grantScopes: [],
+				actions: {
+					"postage/topup": { handler: handlePostageTopup },
+					"postage/balance": { handler: handlePostageBalance },
 				},
 			}),
 		);
@@ -1317,7 +1401,6 @@ export class TapMessagingService {
 	): Promise<TapSendMessageResult> {
 		return await this.withTransportSession(async () => {
 			const contact = await this.requireActiveContact(peer);
-			const request = buildOutgoingMessageRequest(contact, text, scope, options);
 			const timestamp = nowISO();
 			// Fire-and-forget by default: a one-shot peer that isn't running
 			// `tap message listen` during the publish window would otherwise
@@ -1325,7 +1408,13 @@ export class TapMessagingService {
 			// peer advertises attention pricing, though, it may reject with a
 			// -32050 quote — wait for the receipt so that rejection reaches the
 			// caller instead of being silently dropped.
-			const waitForAck = await this.peerAdvertisesAttentionPricing(contact);
+			const pricing = await this.resolvePeerAttentionPricing(contact);
+			const waitForAck = pricing !== null;
+			const postage = pricing ? await this.stampOutboundMessage(contact, pricing) : undefined;
+			const request = buildOutgoingMessageRequest(contact, text, scope, {
+				...options,
+				...(postage ? { postage } : {}),
+			});
 			const receipt = await this.context.transport.send(contact.peerAgentId, request, {
 				peerAddress: contact.peerAgentAddress,
 				waitForAck,
@@ -1640,6 +1729,225 @@ export class TapMessagingService {
 				asyncResult: settledResult,
 			};
 		});
+	}
+
+	/**
+	 * Buy prepaid postage credit at a peer: pay USDC on-chain to the peer's
+	 * agent address through the host's transfer executor, send a
+	 * `postage/topup` action request referencing the payment, wait for the
+	 * signed credit certificate, verify it against the peer's known agent
+	 * address, and record the held credit locally. Auto-stamping on
+	 * `sendMessage` draws on that credit from then on.
+	 */
+	async topUpPostage(peer: string, input: TapPostageTopupInput): Promise<TapPostageTopupResult> {
+		return await this.executionMutex.runExclusive(
+			async () => await this.topUpPostageInternal(peer, input),
+		);
+	}
+
+	private async topUpPostageInternal(
+		peer: string,
+		input: TapPostageTopupInput,
+	): Promise<TapPostageTopupResult> {
+		return await this.withTransportSession(async () => {
+			const contact = await this.requireActiveContact(peer);
+			if (!isValidPostageAmount(input.amount) || postageAmountToMicros(input.amount) <= 0n) {
+				throw new ValidationError(
+					`postage topup amount must be a positive decimal string (≤6 decimals), got ${JSON.stringify(input.amount)}`,
+				);
+			}
+			if (!this.hooks.executeTransfer) {
+				throw new ValidationError("No transfer executor configured for this TAP host");
+			}
+
+			// Pay first: the credit certificate binds to this txHash, and the
+			// receiver's topup handler is idempotent per creditId, so retries
+			// after a timeout never double-pay.
+			const { txHash } = await this.hooks.executeTransfer(this.context.config, {
+				type: "transfer/request",
+				actionId: generateNonce(),
+				asset: "usdc",
+				amount: input.amount,
+				chain: contact.peerChain,
+				toAddress: contact.peerAgentAddress,
+				note: `postage topup from agent #${this.context.config.agentId}`,
+			});
+
+			const payload = buildPostageTopupPayload({
+				amount: input.amount,
+				chain: contact.peerChain,
+				txHash,
+			});
+			const actionId = payload.actionId as string;
+			const creditId = payload.creditId as string;
+			const peerKey = postagePeerKey({ chain: contact.peerChain, agentId: contact.peerAgentId });
+
+			// The payment is irreversible from here on, so persist its trace
+			// BEFORE any transport action: whatever fails later, the ledger
+			// holds the creditId/txHash pair needed to recover or reconcile.
+			// A definitive peer rejection removes the record again below.
+			await this.postageLedger.recordHeld({
+				creditId,
+				peer: peerKey,
+				amount: input.amount,
+				txHash,
+			});
+
+			const request = buildOutgoingActionRequest(
+				contact,
+				`Postage topup: ${input.amount} USDC (credit ${creditId})`,
+				payload,
+				POSTAGE_TOPUP_ACTION,
+			);
+			const requestId = String(request.id);
+			const timestamp = nowISO();
+
+			// matchActionId: false — a delivered failure result must settle the
+			// waiter even when its data part carries no actionId (a pre-postage
+			// peer's UNSUPPORTED_ACTION reply, a handler crash), otherwise a
+			// definitive rejection is misread as a timeout.
+			const waiter = this.registerActionResultWaiter(
+				requestId,
+				actionId,
+				input.waitMs ?? ACTION_RESULT_WAIT_TIMEOUT_MS,
+				{ matchActionId: false },
+			);
+
+			const base = {
+				creditId,
+				amount: input.amount,
+				txHash,
+				peerName: contact.peerDisplayName,
+				peerAgentId: contact.peerAgentId,
+			};
+
+			let receipt: TransportReceipt;
+			try {
+				receipt = await this.sendAndJournalOutboundRequest(
+					contact,
+					request,
+					requestId,
+					timestamp,
+					{ actionType: POSTAGE_TOPUP_ACTION, peerChain: contact.peerChain },
+					() => waiter.cancel(),
+				);
+			} catch (error) {
+				// The payment already happened — never throw it away with the
+				// transport error. The held credit stays recorded as the
+				// recovery handle and the result carries the failure.
+				this.log(
+					"warn",
+					`postage topup ${creditId}: request send failed after payment (${toErrorMessage(error)})`,
+				);
+				return {
+					...base,
+					status: "pending",
+					certificateVerified: false,
+					error: `topup request could not be sent (payment ${txHash} completed): ${toErrorMessage(error)}`,
+				};
+			}
+
+			this.emitActionRequested(
+				contact,
+				requestId,
+				actionKindFromType(POSTAGE_TOPUP_ACTION),
+				payload,
+				"outbound",
+			);
+
+			const asyncResult = await waiter.promise;
+
+			if (!asyncResult) {
+				// No answer inside the wait window. The held credit recorded
+				// above stands: the journal retries the pending request and the
+				// receiver's handler is idempotent per creditId.
+				return { ...base, receipt, status: "pending", certificateVerified: false };
+			}
+
+			const response = parsePostageTopupResponse(asyncResult as unknown as Record<string, unknown>);
+			if (!response || response.error || response.status !== "accepted") {
+				// A delivered non-acceptance: drop the provisional held credit
+				// so auto-stamping can never draw on a credit the peer refused.
+				await this.postageLedger.removeHeld(creditId);
+				const deliveredError = response
+					? response.error?.message
+					: (asyncResult as unknown as { error?: { message?: string } }).error?.message;
+				return {
+					...base,
+					receipt,
+					status: "rejected",
+					certificateVerified: false,
+					error: deliveredError ?? `topup ${response?.status ?? "failed"}`,
+				};
+			}
+
+			let certificateVerified = false;
+			if (response.certificate) {
+				const verification = await verifyPostageCredit(
+					{
+						creditId,
+						issuerChain: contact.peerChain,
+						issuerAgentId: contact.peerAgentId,
+						holderAgentId: this.context.config.agentId,
+						amount: input.amount,
+						txHash,
+					},
+					response.certificate,
+					contact.peerAgentAddress,
+				);
+				certificateVerified = verification.valid;
+				if (!verification.valid) {
+					this.log(
+						"warn",
+						`postage credit ${creditId}: certificate verification failed (${verification.error ?? "unknown"})`,
+					);
+				}
+			}
+
+			await this.postageLedger.recordHeld({
+				creditId,
+				peer: peerKey,
+				amount: input.amount,
+				txHash,
+				...(response.certificate ? { certificate: response.certificate } : {}),
+				certificateVerified,
+			});
+
+			return {
+				...base,
+				receipt,
+				status: "accepted",
+				...(response.certificate ? { certificate: response.certificate } : {}),
+				certificateVerified,
+			};
+		});
+	}
+
+	/**
+	 * The narrow capability surface the postage handlers run on: the
+	 * service-owned ledger plus signing/verification adapters. Handlers
+	 * never see the SigningProvider or the hook table.
+	 */
+	private buildPostageAppExtension(): PostageAppExtension {
+		return {
+			recordIssued: (input) => this.postageLedger.recordIssued(input),
+			issuedFor: (peerKey) => this.postageLedger.issuedFor(peerKey),
+			signCredit: async (facts) => {
+				try {
+					return await signPostageCredit(this.signingProvider, facts);
+				} catch (error) {
+					this.log(
+						"warn",
+						`postage credit ${facts.creditId}: certificate signing failed (${toErrorMessage(error)})`,
+					);
+					return null;
+				}
+			},
+			verifyTopup: async (request, peerKey) =>
+				this.hooks.verifyPostageTopup
+					? await this.hooks.verifyPostageTopup(this.context.config, request, peerKey)
+					: true,
+		};
 	}
 
 	async requestMeeting(input: TapRequestMeetingInput): Promise<TapRequestMeetingResult> {
@@ -2409,6 +2717,17 @@ export class TapMessagingService {
 		requestId: string,
 		actionId: string,
 		timeoutMs: number,
+		options?: {
+			/**
+			 * When false, any result correlated to this requestId settles the
+			 * waiter even if its data part carries no matching actionId. Used
+			 * by flows that must distinguish a delivered failure result (e.g.
+			 * an UNSUPPORTED_ACTION reply from a pre-postage peer, which has
+			 * no actionId at all) from a genuine timeout. Defaults to true —
+			 * the transfer flow's original strict matching.
+			 */
+			matchActionId?: boolean;
+		},
 	): {
 		promise: Promise<TransferActionResponse | null>;
 		cancel: () => void;
@@ -2438,7 +2757,7 @@ export class TapMessagingService {
 		};
 
 		const onResult = (value: TransferActionResponse) => {
-			if (value.actionId !== actionId) {
+			if ((options?.matchActionId ?? true) && value.actionId !== actionId) {
 				return;
 			}
 			finish(value);
@@ -2475,11 +2794,74 @@ export class TapMessagingService {
 	}
 
 	/**
-	 * True when the peer's (cached) registration file advertises a non-empty
-	 * attention price list. Resolution failures never block a send — the
-	 * fire-and-forget default is the fallback.
+	 * Try to pay for an un-granted inbound message with its postage stamp.
+	 * Returns null when the stamp covered the price (the debit is already
+	 * persisted), otherwise the rejection to put on the wire. Charging
+	 * happens against the `standard` tier: without a published standard
+	 * price, enforcement stays "granted peers only" (Phase 3 semantics).
 	 */
-	private async peerAdvertisesAttentionPricing(contact: Contact): Promise<boolean> {
+	private async chargePostageStamp(
+		envelope: { from: number; message: ProtocolMessage },
+		contact: Contact,
+		requestKey: string,
+	): Promise<{ message: string; postage: PostageRejection } | null> {
+		const stamp = extractPostageStamp(envelope.message.params);
+		if (!stamp) {
+			return {
+				message: `attention payment required: no active ${MESSAGE_SEND} grant and no postage stamp from agent #${envelope.from}`,
+				postage: { reason: "missing_stamp" },
+			};
+		}
+		const required = this.context.config.attention?.pricing?.standard;
+		if (required === undefined) {
+			return {
+				message:
+					"attention payment required: no standard attention price published — granted peers only",
+				postage: { reason: "unpriced", creditId: stamp.creditId },
+			};
+		}
+		const debit = await this.postageLedger.debitIssued({
+			creditId: stamp.creditId,
+			peer: postagePeerKey({ chain: contact.peerChain, agentId: contact.peerAgentId }),
+			seq: stamp.seq,
+			cost: stamp.cost,
+			required,
+			// Keyed to this delivery so a crash-window redelivery of the same
+			// message passes idempotently instead of bouncing as a replay.
+			stampKey: requestKey,
+		});
+		if (debit.ok) {
+			return null;
+		}
+		return {
+			message: this.describePostageRejection(debit.rejection),
+			postage: debit.rejection,
+		};
+	}
+
+	private describePostageRejection(rejection: PostageRejection): string {
+		switch (rejection.reason) {
+			case "unknown_credit":
+				return `attention payment required: unknown postage credit ${rejection.creditId}`;
+			case "seq_replayed":
+				return `attention payment required: postage stamp seq already spent on credit ${rejection.creditId}`;
+			case "below_price":
+				return `attention payment required: postage stamp does not cover the standard price ${rejection.required}`;
+			case "insufficient_credit":
+				return `attention payment required: postage credit ${rejection.creditId} exhausted (remaining ${rejection.remaining}, needed ${rejection.required}) — top up to continue`;
+			default:
+				return "attention payment required";
+		}
+	}
+
+	/**
+	 * The peer's advertised attention price list from its (cached)
+	 * registration file, or null when absent/empty. Resolution failures
+	 * never block a send — the fire-and-forget default is the fallback.
+	 */
+	private async resolvePeerAttentionPricing(
+		contact: Contact,
+	): Promise<Record<string, string> | null> {
 		try {
 			const resolved = await this.context.resolver.resolveWithCache(
 				contact.peerAgentId,
@@ -2487,10 +2869,40 @@ export class TapMessagingService {
 				this.context.config.resolveCacheTtlMs,
 			);
 			const pricing = resolved.attention?.pricing;
-			return pricing !== undefined && Object.keys(pricing).length > 0;
+			return pricing !== undefined && Object.keys(pricing).length > 0 ? pricing : null;
 		} catch {
-			return false;
+			return null;
 		}
+	}
+
+	/**
+	 * Auto-stamp an outbound message to a priced peer: holders of a
+	 * `message/send` grant ride free, otherwise spend one stamp at the
+	 * peer's standard price from a held credit. Returns undefined when no
+	 * stamp applies (grant held, no standard price, or no usable credit) —
+	 * the message still goes out and an enforcing receiver answers with a
+	 * -32050 quote the caller sees thanks to waitForAck.
+	 */
+	private async stampOutboundMessage(
+		contact: Contact,
+		pricing: Record<string, string>,
+	): Promise<PostageStamp | undefined> {
+		const grants = findActiveGrantsByScope(contact.permissions.grantedByPeer, MESSAGE_SEND);
+		if (grants.length > 0) {
+			return undefined;
+		}
+		const required = pricing.standard;
+		if (required === undefined) {
+			return undefined;
+		}
+		const stamped = await this.postageLedger.stampHeld({
+			peer: postagePeerKey({ chain: contact.peerChain, agentId: contact.peerAgentId }),
+			cost: required,
+		});
+		if (!stamped.ok) {
+			return undefined;
+		}
+		return stamped.stamp;
 	}
 
 	private async onRequest(envelope: {
@@ -2587,20 +2999,30 @@ export class TapMessagingService {
 		}
 
 		// Attention enforcement (message/send only): with `attention.enforce`
-		// on, a sender holding no active "message/send" grant from us is
-		// rejected with a machine-readable quote BEFORE the message reaches
-		// the conversation log or the notification pipeline — a rejected
-		// message must cost this agent's LLM nothing. The journal entry is
-		// marked completed first so full-history syncs replay the duplicate
-		// short-circuit instead of re-running enforcement per replay.
+		// on, a message from a sender holding no active "message/send" grant
+		// from us must pay with a prepaid postage stamp; a grant is a free
+		// stamp. Unpaid messages are rejected with a machine-readable quote
+		// BEFORE they reach the conversation log or the notification
+		// pipeline — a rejected message must cost this agent's LLM nothing.
+		// Rejections mark the journal entry completed before the throw so
+		// full-history syncs replay the duplicate short-circuit instead of
+		// re-running enforcement per replay. Accepted stamps complete the
+		// journal further down (after the conversation log); a crash in
+		// between redelivers the message with its journal entry pending, and
+		// the ledger's stampKey idempotency lets that exact redelivery pass
+		// without double-debiting.
 		if (envelope.message.method === MESSAGE_SEND && this.context.config.attention?.enforce) {
 			const grants = findActiveGrantsByScope(contact.permissions.grantedByMe, MESSAGE_SEND);
 			if (grants.length === 0) {
-				await this.context.requestJournal.updateStatus(String(envelope.message.id), "completed");
-				throw new AttentionPaymentRequiredError(
-					`attention payment required: no active ${MESSAGE_SEND} grant for agent #${envelope.from}`,
-					this.buildAttentionQuote(),
-				);
+				const rejection = await this.chargePostageStamp(envelope, contact, requestKey);
+				if (rejection) {
+					await this.context.requestJournal.updateStatus(String(envelope.message.id), "completed");
+					throw new AttentionPaymentRequiredError(
+						rejection.message,
+						this.buildAttentionQuote(),
+						rejection.postage,
+					);
+				}
 			}
 		}
 
@@ -4788,6 +5210,7 @@ export class TapMessagingService {
 			extensions: {
 				schedulingHandler: this.schedulingHandler,
 				contact,
+				postage: this.buildPostageAppExtension(),
 			},
 		});
 
