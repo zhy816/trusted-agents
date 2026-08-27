@@ -7,6 +7,7 @@ export const PHASES = {
 	TRANSFERS: 5,
 	ATTENTION: 6,
 	POSTAGE: 7,
+	WAKE_QUOTA: 8,
 } as const;
 
 export const SCENARIOS = {
@@ -106,5 +107,26 @@ export const SCENARIOS = {
 	POSTAGE_BALANCE: {
 		name: "Postage balance shows held and issued credits (both agents)",
 		phase: PHASES.POSTAGE,
+	},
+
+	// Phase 8: Paid wake-ups + notification quotas. Mock-only like Phases
+	// 6/7: both mechanisms are opt-in and the assertions inspect the
+	// receiver's drained notification batch, which needs the in-process
+	// daemon's HTTP surface.
+	WAKE_PRICING_ON: {
+		name: "Publish a priority attention price (Agent B)",
+		phase: PHASES.WAKE_QUOTA,
+	},
+	WAKE_PRIORITY_STAMP: {
+		name: "Priority stamp escalates with a 400-char excerpt (A to B)",
+		phase: PHASES.WAKE_QUOTA,
+	},
+	QUOTA_GRANT_FOLD: {
+		name: "Over-quota grant holder's chatter folds to one summary line (A at B)",
+		phase: PHASES.WAKE_QUOTA,
+	},
+	WAKE_GRANT_HOLDER_PRIORITY: {
+		name: "Grant holder's priority stamp still buys the wake-up (A to B)",
+		phase: PHASES.WAKE_QUOTA,
 	},
 } as const;

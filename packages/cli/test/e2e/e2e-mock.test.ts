@@ -182,11 +182,12 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 				capabilities: ["general-chat", "payments"],
 				// Phase 6 exercises attention pricing: B advertises a price list
 				// so A's dry-run can quote it and A's sends wait for receipts.
+				// The priority tier is Phase 8's paid wake-up price.
 				attention: {
 					version: "1.0",
 					currency: "USDC",
 					chain: CHAIN,
-					pricing: { grantHolder: "0", standard: "0.001" },
+					pricing: { grantHolder: "0", standard: "0.001", priority: "0.002" },
 				},
 			}),
 		]);
@@ -512,9 +513,9 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 			]);
 			expect(result.exitCode, `Agent B request-funds failed:\n${result.stderr}`).toBe(0);
 			expect(result.stdout).toContain("Status:                   completed");
-			expect(result.stdout).toContain(
-				"0xa100000000000000000000000000000000000000000000000000000000000000",
-			);
+			// The loopback executor mints per-call unique hashes with A's "a1"
+			// prefix (real chains never reuse a txHash, and neither may mocks).
+			expect(result.stdout).toMatch(/0xa1[0-9a-f]{62}/);
 		});
 
 		it(SCENARIOS.REVOKE_GRANT.name, async () => {
@@ -695,7 +696,11 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 			};
 			expect(data.dry_run).toBe(true);
 			expect(data.attention_currency).toBe("USDC");
-			expect(data.attention_pricing).toEqual({ grantHolder: "0", standard: "0.001" });
+			expect(data.attention_pricing).toEqual({
+				grantHolder: "0",
+				standard: "0.001",
+				priority: "0.002",
+			});
 			expect(data.estimated_tier).toBe("standard");
 			expect(data.estimated_cost).toBe("0.001");
 		});
@@ -941,6 +946,187 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 			expect(dataB.issued).toMatchObject([
 				{ credit_id: topupCreditId, spent: "0.002", last_seq: 2 },
 			]);
+		});
+	});
+
+	// ── Phase 8: Paid wake-ups + notification quotas ──────────────────────────
+
+	describe("Phase 8: Paid wake-ups + notification quotas", () => {
+		const PRIORITY_TEXT = "priority payload needing the full excerpt ".repeat(6).trim();
+		let wakeCreditId: string | undefined;
+
+		// Drain B's notification queue over the in-process daemon's HTTP
+		// surface — exactly what the OpenClaw/Hermes hosts consume, with the
+		// quota fold already applied server-side.
+		async function drainB(): Promise<Array<{ type: string; oneLiner: string; count?: number }>> {
+			const response = await fetch(`http://127.0.0.1:${agentBTapd?.port}/api/notifications/drain`, {
+				headers: { authorization: `Bearer ${agentBTapd?.token}` },
+			});
+			expect(response.status).toBe(200);
+			const body = (await response.json()) as {
+				notifications: Array<{ type: string; oneLiner: string; count?: number }>;
+			};
+			return body.notifications;
+		}
+
+		it(SCENARIOS.WAKE_PRICING_ON.name, async () => {
+			await setAttentionConfig(agentBDir, {
+				enforce: true,
+				pricing: { grantHolder: "0", standard: "0.001", priority: "0.002" },
+			});
+			await agentBTapd?.stop();
+			agentBTapd = await startInProcessTapd({
+				dataDir: agentBDir,
+				identityAgentId: AGENT_B_ID,
+			});
+			expect(agentBTapd.port).toBeGreaterThan(0);
+		});
+
+		it(SCENARIOS.WAKE_PRIORITY_STAMP.name, async () => {
+			// Fresh credit — Phase 7 drained the first one dry.
+			const topup = await runCli([
+				"--json",
+				"--data-dir",
+				agentADir,
+				"postage",
+				"topup",
+				AGENT_B_NAME,
+				"--amount",
+				"0.004",
+				"--yes",
+			]);
+			expect(topup.exitCode, `topup failed:\n${topup.stderr}`).toBe(0);
+			wakeCreditId = (parseJsonOutput(topup.stdout).data as { credit_id: string }).credit_id;
+
+			const send = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				PRIORITY_TEXT,
+				"--priority",
+			]);
+			expect(send.exitCode, `priority send failed:\n${send.stderr}`).toBe(0);
+
+			const drained = await drainB();
+			const escalation = drained.find((n) => n.type === "escalation");
+			expect(escalation, "priority message must escalate").toBeDefined();
+			expect(escalation?.oneLiner).toContain("Priority message from");
+			// The paid excerpt keeps far more than the standard 80 chars.
+			expect(escalation?.oneLiner).toContain(PRIORITY_TEXT.slice(0, 200));
+
+			// The stamp paid the priority price, not standard.
+			const balanceB = await runCli(["--json", "--data-dir", agentBDir, "postage", "balance"]);
+			const issued = (
+				parseJsonOutput(balanceB.stdout).data as {
+					issued: Array<{ credit_id: string; spent: string }>;
+				}
+			).issued;
+			expect(issued.find((c) => c.credit_id === wakeCreditId)).toMatchObject({
+				spent: "0.002",
+			});
+		});
+
+		it(SCENARIOS.QUOTA_GRANT_FOLD.name, async () => {
+			// B re-grants A message/send, now metered: 2 rendered lines/week.
+			// The priority escalation above already billed A one rendered line.
+			const grantFilePath = await writeGrantFile(agentBDir, "quota-grant.json", [
+				{
+					grantId: "e2e-quota-msg",
+					scope: "message/send",
+					constraints: { notificationsPerWeek: 2 },
+				},
+			]);
+			const grant = await runCli([
+				"--plain",
+				"--data-dir",
+				agentBDir,
+				"permissions",
+				"grant",
+				AGENT_A_NAME,
+				"--file",
+				grantFilePath,
+				"--note",
+				"e2e metered exemption",
+			]);
+			expect(grant.exitCode, `quota grant failed:\n${grant.stderr}`).toBe(0);
+			await waitForPermissionsMock(agentADir, AGENT_B_NAME, (snapshot) =>
+				snapshot.granted_by_peer.grants.some(
+					(entry) => entry.grantId === "e2e-quota-msg" && entry.status === "active",
+				),
+			);
+
+			// Under quota (1 of 2 rendered): free chatter still renders,
+			// coalesced into one counted line.
+			for (const text of ["quota chatter one", "quota chatter two"]) {
+				const result = await runCli([
+					"--plain",
+					"--data-dir",
+					agentADir,
+					"message",
+					"send",
+					AGENT_B_NAME,
+					text,
+				]);
+				expect(result.exitCode, `free send failed:\n${result.stderr}`).toBe(0);
+			}
+			const first = await drainB();
+			expect(first).toHaveLength(1);
+			expect(first[0]).toMatchObject({ type: "info", count: 2 });
+
+			// Quota reached (2 of 2): the next batch folds to a summary line.
+			for (const text of ["quota chatter three", "quota chatter four"]) {
+				const result = await runCli([
+					"--plain",
+					"--data-dir",
+					agentADir,
+					"message",
+					"send",
+					AGENT_B_NAME,
+					text,
+				]);
+				expect(result.exitCode, `free send failed:\n${result.stderr}`).toBe(0);
+			}
+			const second = await drainB();
+			expect(second).toHaveLength(1);
+			expect(second[0]?.type).toBe("summary");
+			expect(second[0]?.oneLiner).toContain("folded — weekly notification quota reached (2/week)");
+			expect(second[0]?.oneLiner).not.toContain("quota chatter three");
+		});
+
+		it(SCENARIOS.WAKE_GRANT_HOLDER_PRIORITY.name, async () => {
+			// A now holds the (exhausted-quota) grant — a priority stamp still
+			// buys the escalation, and escalations are never quota-folded.
+			const send = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"granted but urgent: wake up",
+				"--priority",
+			]);
+			expect(send.exitCode, `grant-holder priority send failed:\n${send.stderr}`).toBe(0);
+
+			const drained = await drainB();
+			expect(drained).toHaveLength(1);
+			expect(drained[0]?.type).toBe("escalation");
+			expect(drained[0]?.oneLiner).toContain("granted but urgent");
+
+			// Charged at priority on top of the earlier spend: 0.004 total.
+			const balanceB = await runCli(["--json", "--data-dir", agentBDir, "postage", "balance"]);
+			const issued = (
+				parseJsonOutput(balanceB.stdout).data as {
+					issued: Array<{ credit_id: string; spent: string; remaining: string }>;
+				}
+			).issued;
+			expect(issued.find((c) => c.credit_id === wakeCreditId)).toMatchObject({
+				spent: "0.004",
+				remaining: "0",
+			});
 		});
 	});
 

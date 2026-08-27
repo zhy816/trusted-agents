@@ -211,6 +211,9 @@ export function installLoopbackRuntime(params: {
 	txHashPrefix: string;
 	calendarProvider?: ICalendarProvider;
 }): void {
+	// Real chains never reuse a transaction hash; the postage ledger relies
+	// on that (one credit per txHash), so the mock executor must too.
+	let txCounter = 0;
 	setCliRuntimeOverride(params.dataDir, {
 		createContext: () => ({
 			trustStore: new FileTrustStore(params.dataDir),
@@ -220,9 +223,15 @@ export function installLoopbackRuntime(params: {
 			...(params.calendarProvider ? { calendarProvider: params.calendarProvider } : {}),
 		}),
 		createTransport: (config) => new LoopbackTransport(params.network, config.agentId),
-		executeTransferAction: async () => ({
-			txHash: formatTxHash(params.txHashPrefix),
-		}),
+		executeTransferAction: async () => {
+			txCounter += 1;
+			// Fixed-width counter: formatTxHash right-pads with zeros, so a
+			// variable-width suffix would collide (counter 1 "a11…0" ===
+			// counter 16 "a110…0").
+			return {
+				txHash: formatTxHash(`${params.txHashPrefix}${txCounter.toString(16).padStart(8, "0")}`),
+			};
+		},
 	});
 }
 

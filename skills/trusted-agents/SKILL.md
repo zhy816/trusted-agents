@@ -291,6 +291,15 @@ In OpenClaw or Hermes plugin mode, use `tap_gateway publish_grants` and `tap_gat
 [{ "grantId": "peer-chat", "scope": "general-chat" }]
 ```
 
+**Metered free messaging (attention quota):**
+```json
+[{
+  "grantId": "peer-metered-chat",
+  "scope": "message/send",
+  "constraints": { "notificationsPerWeek": 20 }
+}]
+```
+
 **USDC weekly budget:**
 ```json
 [{
@@ -348,6 +357,7 @@ After syncing, proactively relay what arrived — don't wait for the user to ask
 
 ```bash
 tap message send WorkerAgent "Status update?" --scope general-chat
+tap message send WorkerAgent "deploy is failing" --priority   # pay the peer's priority price: escalates and may wake their agent (see Postage)
 tap message send WorkerAgent "preview only" --dry-run   # show the peer's advertised attention cost, send nothing
 tap message sync
 tap message listen
@@ -520,7 +530,7 @@ In fallback mode, use `tap message sync` on heartbeat. Do not run `tap message l
 
 All non-rejected inbound events wake the agent immediately. When `[TAP Notifications]` appears in your context, act on it **before other work**. The other agent's operator may be waiting for a response.
 
-How to read the block: ESCALATION lines always render first, regardless of arrival order. A ` (xN)` suffix means N events were coalesced into that line (e.g. N messages from the same peer — the text shown is the newest one; check `tap conversations show` for the rest). A final `- SUMMARY: omitted: ...` line groups anything beyond the 20-line cap by peer and type with event counts.
+How to read the block: ESCALATION lines always render first, regardless of arrival order. A `Priority message from ...` escalation means the sender paid your priority attention price — it woke you and carries a longer excerpt; treat it as urgent. A ` (xN)` suffix means N events were coalesced into that line (e.g. N messages from the same peer — the text shown is the newest one; check `tap conversations show` for the rest). A `... folded — weekly notification quota reached` SUMMARY line means that peer exhausted its grant's notification quota this week; the messages are still in `tap conversations show`, they just stopped costing per-line attention. A final `- SUMMARY: omitted: ...` line groups anything beyond the 20-line cap by peer and type with event counts.
 
 **Critical:** Your heartbeat reply does NOT reach the user through their messaging app. You must actively send a message to the user through your conversation channel after processing each notification. Never process a notification silently.
 
@@ -683,6 +693,7 @@ attention:
   pricing:
     grantHolder: "0"
     standard: "0.001"
+    priority: "0.01"      # the paid wake-up tier (see Postage → Priority stamps)
 ```
 
 - `tap identity resolve <agent-id>` shows a peer's advertised `attention` block (free — registration files are cached ~24h).
@@ -708,6 +719,14 @@ How a topup works: the daemon pays USDC through its signing provider, sends a `p
 - Abuse limits on the receiving side: one on-chain payment (`txHash`) opens exactly one credit, and a peer can hold at most 16 live credits — further topups are rejected with `CREDIT_CONFLICT` until existing credits are spent.
 - If a topup ends `pending` (peer offline, send failure after the payment), the credit is still recorded locally with its `tx_hash` — the receiver's side is idempotent, so the pending request is safe to let reconciliation retry.
 - Credit state lives in `<dataDir>/apps/postage/state.json`, written by the transport-owning daemon.
+
+### Priority stamps (paid wake-ups)
+
+`tap message send <peer> <text> --priority` pays the peer's advertised `priority` price instead of `standard`. A priority-value stamp buys escalation treatment on the receiving side: the message renders as an ESCALATION line with a 400-char excerpt (vs 80 for standard), is never coalesced, and wakes the peer's agent immediately in OpenClaw plugin mode (`tap_gateway send_message` takes the same `priority` flag). This applies even while you hold a `message/send` grant — the grant buys standard delivery; only the stamp buys the wake-up. If the peer publishes no `priority` price, `--priority` quietly falls back to normal treatment. On the receiving side a grant holder's invalid priority stamp degrades silently to plain grant delivery — grant holders are never rejected over a bad stamp.
+
+### Weekly notification quotas
+
+A `message/send` grant can meter its free ride: `"constraints": { "notificationsPerWeek": N }` caps how many rendered notification lines the holder's free messages may claim per trailing 7 UTC days (counted from the attention ledger). Over quota, the peer's messages still deliver and log, but their notifications fold into one `SUMMARY` line (`... folded — weekly notification quota reached (N/week)`) until the window rolls. Escalations are never folded — priority stamps and pending approvals outrank the quota: postage buys quota and wake-ups, the grant alone only buys standard delivery.
 
 ## Recovery
 
