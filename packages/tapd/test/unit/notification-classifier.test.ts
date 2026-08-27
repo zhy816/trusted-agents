@@ -30,6 +30,8 @@ describe("classifyEventToNotification", () => {
 		expect(note?.type).toBe("escalation");
 		expect(note?.oneLiner).toContain("transfer");
 		expect(note?.data?.requestId).toBe("req-1");
+		expect(note?.coalesceKey).toBe("req:req-1");
+		expect(note?.coalesceStrategy).toBe("replace");
 	});
 
 	it("escalates inbound connection.requested events", () => {
@@ -72,6 +74,10 @@ describe("classifyEventToNotification", () => {
 		expect(note?.type).toBe("info");
 		expect(note?.oneLiner).toContain("Bob");
 		expect(note?.oneLiner).toContain("Hello world");
+		expect(note?.coalesceKey).toBe("msg:conn-1");
+		expect(note?.coalesceStrategy).toBe("count");
+		expect(note?.data?.peerName).toBe("Bob");
+		expect(note?.data?.connectionId).toBe("conn-1");
 	});
 
 	it("truncates long message text", () => {
@@ -127,6 +133,8 @@ describe("classifyEventToNotification", () => {
 		const note = classifyEventToNotification(event);
 		expect(note?.type).toBe("info");
 		expect(note?.data?.txHash).toBe("0xabc");
+		expect(note?.coalesceKey).toBe("req:req-c");
+		expect(note?.coalesceStrategy).toBe("replace");
 	});
 
 	it("escalates action.failed", () => {
@@ -141,6 +149,36 @@ describe("classifyEventToNotification", () => {
 		const note = classifyEventToNotification(event);
 		expect(note?.type).toBe("escalation");
 		expect(note?.oneLiner).toContain("no matching slot");
+		expect(note?.coalesceKey).toBe("req:req-f");
+		expect(note?.coalesceStrategy).toBe("replace");
+	});
+
+	it("gives connection lifecycle events no coalesceKey", () => {
+		const requested: TapEvent = {
+			...BASE,
+			type: "connection.requested",
+			requestId: "req-conn",
+			peerAgentId: 77,
+			peerChain: "eip155:8453",
+			direction: "inbound",
+		};
+		expect(classifyEventToNotification(requested)?.coalesceKey).toBeUndefined();
+
+		const established: TapEvent = {
+			...BASE,
+			type: "connection.established",
+			connectionId: "conn-1",
+			peer: PEER,
+		};
+		expect(classifyEventToNotification(established)?.coalesceKey).toBeUndefined();
+
+		const failed: TapEvent = {
+			...BASE,
+			type: "connection.failed",
+			requestId: "req-fail",
+			error: "invite rejected",
+		};
+		expect(classifyEventToNotification(failed)?.coalesceKey).toBeUndefined();
 	});
 
 	it("returns null for events that should not surface", () => {
