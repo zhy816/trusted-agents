@@ -76,6 +76,19 @@ export function validateConfig(
 		}
 	}
 
+	if (partial.attention !== undefined) {
+		if (partial.attention.enforce !== undefined && typeof partial.attention.enforce !== "boolean") {
+			throw new ConfigError("attention.enforce must be a boolean");
+		}
+		if (partial.attention.pricing !== undefined) {
+			for (const [tier, amount] of Object.entries(partial.attention.pricing)) {
+				if (typeof amount !== "string" || !/^\d+(\.\d{1,6})?$/.test(amount)) {
+					throw new ConfigError(`attention.pricing.${tier} must be a decimal amount string`);
+				}
+			}
+		}
+	}
+
 	return {
 		...DEFAULT_CONFIG,
 		...partial,
