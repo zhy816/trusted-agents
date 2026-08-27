@@ -96,6 +96,47 @@ describe("classifyEventToNotification", () => {
 		expect(note?.oneLiner).toContain("…");
 	});
 
+	it("carries the paid postage tier in the notification data", () => {
+		const event: TapEvent = {
+			...BASE,
+			type: "message.received",
+			conversationId: "conv-1",
+			peer: PEER,
+			messageId: "m-1",
+			text: "paid hello",
+			scope: "general-chat",
+			postage: { tier: "standard", cost: "0.001" },
+		};
+		const note = classifyEventToNotification(event);
+		expect(note?.type).toBe("info");
+		expect(note?.data?.postageTier).toBe("standard");
+		expect(note?.data?.postageCost).toBe("0.001");
+		expect(note?.coalesceKey).toBe("msg:conn-1");
+	});
+
+	it("escalates priority-paid messages with a 400-char excerpt and no coalescing", () => {
+		const longText = "y".repeat(500);
+		const event: TapEvent = {
+			...BASE,
+			type: "message.received",
+			conversationId: "conv-1",
+			peer: PEER,
+			messageId: "m-1",
+			text: longText,
+			scope: "general-chat",
+			postage: { tier: "priority", cost: "0.01" },
+		};
+		const note = classifyEventToNotification(event);
+		expect(note?.type).toBe("escalation");
+		expect(note?.oneLiner).toContain("Priority message from Bob");
+		// 400 chars of text survive (vs 80 for standard treatment).
+		expect(note?.oneLiner).toContain("y".repeat(400));
+		expect(note?.oneLiner).not.toContain("y".repeat(401));
+		// Each paid wake-up stays individually visible — never coalesced.
+		expect(note?.coalesceKey).toBeUndefined();
+		expect(note?.data?.postageTier).toBe("priority");
+	});
+
 	it("produces info notifications for connection.established", () => {
 		const event: TapEvent = {
 			...BASE,

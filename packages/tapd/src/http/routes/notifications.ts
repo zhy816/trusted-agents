@@ -2,17 +2,29 @@ import {
 	type AttentionDelta,
 	type AttentionPeerRef,
 	type FileAttentionLedger,
+	type ITrustStore,
 	attentionPeerKey,
 } from "trusted-agents-core";
 import { notificationEventCount, planNotificationRender } from "../../notification-format.js";
 import type { NotificationQueue, TapNotification } from "../../notification-queue.js";
+import { applyNotificationQuota } from "../../notification-quota.js";
 import type { RouteHandler } from "../router.js";
 
 export interface NotificationsRouteOptions {
-	/** When set, every drain records attention accounting before returning. */
-	ledger?: Pick<FileAttentionLedger, "record">;
+	/**
+	 * When set, every drain records attention accounting before returning;
+	 * `read` also feeds the weekly quota check when `trustStore` is set.
+	 */
+	ledger?: Pick<FileAttentionLedger, "record" | "renderedInWindow">;
 	/** The daemon's own identity, stamped on the ledger file. */
 	identity?: () => AttentionPeerRef;
+	/**
+	 * When set together with `ledger`, drained batches pass through the
+	 * weekly notification quota fold (grant constraints looked up here)
+	 * before accounting and before the batch goes over the wire — so every
+	 * host, including the Hermes Python mirror, sees the folded batch.
+	 */
+	trustStore?: Pick<ITrustStore, "findByAgentId">;
 	/**
 	 * A ledger write failure must never fail the drain — a 500 here starves
 	 * host plugins of notifications. The error is handed here instead.
@@ -25,7 +37,14 @@ export function createNotificationsRoute(
 	options: NotificationsRouteOptions = {},
 ): RouteHandler<unknown, { notifications: TapNotification[] }> {
 	return async () => {
-		const notifications = queue.drain();
+		let notifications = queue.drain();
+		if (options.trustStore && options.ledger && notifications.length > 0) {
+			notifications = await applyNotificationQuota(notifications, {
+				trustStore: options.trustStore,
+				ledger: options.ledger,
+				onError: options.onLedgerError,
+			});
+		}
 		if (options.ledger && notifications.length > 0) {
 			try {
 				await options.ledger.record(buildAttentionDeltas(notifications), {
@@ -75,7 +94,14 @@ export function buildAttentionDeltas(notifications: TapNotification[]): Attentio
 	if (plan) {
 		for (const { notification, line } of plan.rendered) {
 			const peer = peerOf(notification);
-			bump(peer, "notificationsRendered", 1);
+			// A quota-fold summary must not count as a rendered line for its
+			// peer: renderedInWindow feeds the next quota decision, and
+			// billing the fold itself would re-top the trailing window on
+			// every drain — the documented "until the window rolls" recovery
+			// would never happen. Its token cost is still real and billed.
+			if (notification.data?.quotaFolded !== true) {
+				bump(peer, "notificationsRendered", 1);
+			}
 			bump(peer, "tokensInjected", estimateTokens(line));
 		}
 		let overheadChars = plan.header.length;

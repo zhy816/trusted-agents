@@ -75,6 +75,78 @@ describe("notifications route", () => {
 		expect(calls).toBe(0);
 	});
 
+	it("folds over-quota grant holders before accounting and before the wire", async () => {
+		const q = new NotificationQueue();
+		q.enqueue(
+			note({
+				id: "a",
+				oneLiner: "New message from Bob: chatter one",
+				data: { peerAgentId: 7, peerChain: "eip155:8453", peerName: "Bob" },
+			}),
+		);
+		q.enqueue(
+			note({
+				id: "b",
+				oneLiner: "New message from Bob: chatter two",
+				data: { peerAgentId: 7, peerChain: "eip155:8453", peerName: "Bob" },
+			}),
+		);
+		const recorded: Array<{ deltas: AttentionDelta[] }> = [];
+		const handler = createNotificationsRoute(q, {
+			ledger: {
+				record: async (deltas) => {
+					recorded.push({ deltas });
+				},
+				renderedInWindow: async () => 5,
+			},
+			trustStore: {
+				findByAgentId: async () => ({
+					connectionId: "conn-bob",
+					peerAgentId: 7,
+					peerChain: "eip155:8453",
+					peerOwnerAddress: "0x2222222222222222222222222222222222222222" as `0x${string}`,
+					peerDisplayName: "Bob",
+					peerAgentAddress: "0x2222222222222222222222222222222222222222" as `0x${string}`,
+					permissions: {
+						grantedByMe: {
+							version: "tap-grants/v1",
+							updatedAt: "",
+							grants: [
+								{
+									grantId: "g",
+									scope: "message/send",
+									constraints: { notificationsPerWeek: 5 },
+									status: "active" as const,
+									updatedAt: "",
+								},
+							],
+						},
+						grantedByPeer: { version: "tap-grants/v1", updatedAt: "", grants: [] },
+					},
+					establishedAt: "",
+					lastContactAt: "",
+					status: "active" as const,
+				}),
+			},
+		});
+
+		const result = (await handler({}, undefined)) as {
+			notifications: Array<{ type: string; oneLiner: string; count?: number }>;
+		};
+		// The wire batch is the folded batch — every host (incl. the Hermes
+		// Python mirror) sees one summary line instead of the chatter.
+		expect(result.notifications).toHaveLength(1);
+		expect(result.notifications[0]).toMatchObject({ type: "summary", count: 2 });
+		expect(result.notifications[0]?.oneLiner).toContain("folded — weekly notification quota");
+		// Accounting was computed on the folded batch: the summary's token
+		// cost bills the peer, but it is NOT a rendered line for quota
+		// purposes — billing the fold itself would re-top the trailing
+		// window on every drain and the quota would never recover.
+		const peerDelta = recorded[0]?.deltas.find((d) => d.peer?.agentId === 7);
+		expect(peerDelta?.notificationsRendered).toBeUndefined();
+		expect(peerDelta?.tokensInjected).toBeGreaterThan(0);
+	});
+
 	it("still returns the drained batch when the ledger write fails", async () => {
 		const q = new NotificationQueue();
 		q.enqueue(note({ id: "a" }));

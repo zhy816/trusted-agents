@@ -41,19 +41,36 @@ export function classifyEventToNotification(event: TapEvent): TapNotification | 
 				peerAgentId: event.peerAgentId,
 				peerChain: event.peerChain,
 			});
-		case "message.received":
+		case "message.received": {
+			// A priority-tier stamp bought escalation treatment: the line can
+			// wake the agent, carries a wider excerpt (400 chars vs 80), and
+			// is never coalesced — each paid wake-up stays individually
+			// visible. Standard/free messages keep the compact counted form.
+			const priority = event.postage?.tier === "priority";
+			const data = {
+				conversationId: event.conversationId,
+				connectionId: event.peer.connectionId,
+				peerAgentId: event.peer.peerAgentId,
+				peerName: event.peer.peerName,
+				peerChain: event.peer.peerChain,
+				...(event.postage
+					? { postageTier: event.postage.tier, postageCost: event.postage.cost }
+					: {}),
+			};
+			if (priority) {
+				return note(
+					"escalation",
+					`Priority message from ${event.peer.peerName || "peer"}: ${truncate(event.text, 400)}`,
+					data,
+				);
+			}
 			return note(
 				"info",
 				`New message from ${event.peer.peerName || "peer"}: ${truncate(event.text, 80)}`,
-				{
-					conversationId: event.conversationId,
-					connectionId: event.peer.connectionId,
-					peerAgentId: event.peer.peerAgentId,
-					peerName: event.peer.peerName,
-					peerChain: event.peer.peerChain,
-				},
+				data,
 				{ key: `msg:${event.peer.connectionId}`, strategy: "count" },
 			);
+		}
 		case "connection.established":
 			return note("info", `Connection established with ${event.peer.peerName || "peer"}`, {
 				connectionId: event.connectionId,

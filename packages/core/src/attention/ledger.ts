@@ -148,6 +148,29 @@ export class FileAttentionLedger {
 		return await this.load();
 	}
 
+	/**
+	 * Notifications rendered for one peer over the trailing `days` UTC days
+	 * (today inclusive). This is the number notification quotas enforce
+	 * against: the ledger records exactly what the render plan billed, so
+	 * "rendered" here means lines that actually reached a host context.
+	 * Window sizes beyond the retention window under-count by design.
+	 */
+	async renderedInWindow(peer: AttentionPeerRef, days: number, now = new Date()): Promise<number> {
+		if (!Number.isInteger(days) || days <= 0) {
+			throw new Error("renderedInWindow days must be a positive integer");
+		}
+		const cutoff = new Date(now.getTime() - (days - 1) * DAY_MS).toISOString().slice(0, 10);
+		const key = attentionPeerKey(peer);
+		const data = await this.load();
+		let rendered = 0;
+		for (const [day, bucket] of Object.entries(data.days)) {
+			if (day >= cutoff) {
+				rendered += bucket.peers[key]?.notificationsRendered ?? 0;
+			}
+		}
+		return rendered;
+	}
+
 	/** Aggregate all retained days per peer, sorted by tokens injected. */
 	async summarize(): Promise<AttentionSummaryRow[]> {
 		const data = await this.load();

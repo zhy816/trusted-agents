@@ -314,8 +314,11 @@ export class Daemon {
 				const identity = this.options.identitySource();
 				return { chain: identity.chain, agentId: identity.agentId };
 			},
+			// Grants (weekly notification quotas) are looked up per drained
+			// peer so over-quota chatter folds before it reaches any host.
+			trustStore: this.options.trustStore,
 			onLedgerError: (error) => {
-				console.warn(`tapd: attention ledger write failed: ${toErrorMessage(error)}`);
+				console.warn(`tapd: attention ledger accounting failed: ${toErrorMessage(error)}`);
 			},
 		});
 		router.add("GET", "/api/notifications/drain", notifications);

@@ -55,7 +55,11 @@ describe("Daemon → NotificationQueue wiring", () => {
 				dataDir,
 			}),
 			buildService: async () => service as never,
-			trustStore: { getContacts: async () => [], getContact: async () => null } as never,
+			trustStore: {
+				getContacts: async () => [],
+				getContact: async () => null,
+				findByAgentId: async () => null,
+			} as never,
 			conversationLogger: {
 				logMessage: async () => {},
 				getConversation: async () => null,

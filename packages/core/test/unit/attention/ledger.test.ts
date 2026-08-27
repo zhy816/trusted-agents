@@ -127,4 +127,30 @@ describe("FileAttentionLedger", () => {
 			ledger.record([{ peer: BOB, tokensInjected: 1 }], { at: "not-a-date" }),
 		).rejects.toThrow(/invalid timestamp/);
 	});
+
+	it("renderedInWindow sums one peer's rendered lines over the trailing days only", async () => {
+		const ledger = new FileAttentionLedger(dataDir);
+		// Inside the 7-day window ending 2026-08-28: the 22nd..28th.
+		await ledger.record([{ peer: BOB, notificationsRendered: 2 }], {
+			at: "2026-08-22T09:00:00.000Z",
+		});
+		await ledger.record([{ peer: BOB, notificationsRendered: 3 }], {
+			at: "2026-08-28T01:00:00.000Z",
+		});
+		// Outside the window (the 21st), and another peer inside it.
+		await ledger.record([{ peer: BOB, notificationsRendered: 10 }], {
+			at: "2026-08-21T23:59:00.000Z",
+		});
+		await ledger.record([{ peer: CAROL, notificationsRendered: 7 }], {
+			at: "2026-08-27T12:00:00.000Z",
+		});
+
+		const now = new Date("2026-08-28T02:00:00.000Z");
+		expect(await ledger.renderedInWindow(BOB, 7, now)).toBe(5);
+		expect(await ledger.renderedInWindow(CAROL, 7, now)).toBe(7);
+		expect(await ledger.renderedInWindow({ chain: "eip155:8453", agentId: 99 }, 7, now)).toBe(0);
+		// A 1-day window sees only today's bucket.
+		expect(await ledger.renderedInWindow(BOB, 1, now)).toBe(3);
+		await expect(ledger.renderedInWindow(BOB, 0, now)).rejects.toThrow(/positive integer/);
+	});
 });
