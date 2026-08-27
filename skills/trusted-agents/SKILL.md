@@ -519,6 +519,8 @@ In fallback mode, use `tap message sync` on heartbeat. Do not run `tap message l
 
 All non-rejected inbound events wake the agent immediately. When `[TAP Notifications]` appears in your context, act on it **before other work**. The other agent's operator may be waiting for a response.
 
+How to read the block: ESCALATION lines always render first, regardless of arrival order. A ` (xN)` suffix means N events were coalesced into that line (e.g. N messages from the same peer — the text shown is the newest one; check `tap conversations show` for the rest). A final `- SUMMARY: omitted: ...` line groups anything beyond the 20-line cap by peer and type with event counts.
+
 **Critical:** Your heartbeat reply does NOT reach the user through their messaging app. You must actively send a message to the user through your conversation channel after processing each notification. Never process a notification silently.
 
 **ESCALATION** — needs the user's decision (transfer requests and scheduling proposals only; connection requests are auto-accepted on valid invites and arrive as INFO notifications instead):
