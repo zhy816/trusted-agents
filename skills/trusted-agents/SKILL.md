@@ -641,7 +641,7 @@ tap app install @trustedagents/app-transfer
 tap app remove @trustedagents/app-scheduling
 ```
 
-Transfer, scheduling, and permission-request handling are built into the TAP runtime today. `tap app install` is for additional third-party TAP apps published to npm.
+Transfer, scheduling, postage, and permission-request handling are built into the TAP runtime today. `tap app install` is for additional third-party TAP apps published to npm.
 
 ## Debugging
 
@@ -690,6 +690,25 @@ attention:
 - With `enforce: true`, an inbound `message/send` from a sender holding no active `message/send` grant from you is rejected before it reaches your conversation log or notifications — the sender receives JSON-RPC error `-32050` with the machine-readable quote in `error.data.attention` (CLI/daemon surface it as HTTP 402 `attention_payment_required`).
 - Granting a peer `message/send` (`tap permissions grant <peer> --file <grants.json>` with a `"scope": "message/send"` grant) exempts them — grants are free stamps.
 
+## Postage
+
+Prepaid postage lets an un-granted sender pay for attention instead of being rejected: buy a credit at the receiver once, then every `tap message send` to that peer automatically attaches a stamp (`creditId` + a strictly increasing `seq` + the `cost` in USDC) until the credit runs dry. Grants stay free stamps — stamped or not, a `message/send` grant holder is never charged.
+
+```bash
+tap postage topup <peer> --amount 0.01        # pay 0.01 USDC on-chain to the peer's agent address and open a credit (prompts; --yes to skip, --dry-run to preview)
+tap postage balance [--peer <peer>]           # local read: credits you hold at peers, and credits peers bought with you
+```
+
+How a topup works: the daemon pays USDC through its signing provider, sends a `postage/topup` action request referencing the payment `txHash`, and waits for the receiver's **credit certificate** — a signature over the credit facts by the receiver's agent wallet, verified locally against the peer's known agent address (`certificate_verified` in the output). Topups are idempotent per credit: a retry after a timeout returns the same certificate instead of double-charging.
+
+- The receiving side needs `attention.enforce: true` and a `standard` price published — stamps are charged at the standard tier. Without a standard price, enforcement stays granted-peers-only.
+- A rejected send still returns the `-32050` quote; when postage was the reason, `error.data.postage` says why (`missing_stamp`, `insufficient_credit` with the remaining balance, `seq_replayed`, `below_price`, `unknown_credit`) so the sender knows whether a `tap postage topup` fixes it.
+- `tap message send <peer> <text> --dry-run` also shows `postage_remaining` and `would_stamp` for the peer.
+- Peers can query their own balance on your ledger over the wire with a `postage/balance` action request (SDK: `runtime.sendAction(peerId, "postage/balance", ...)`); the reply only ever contains the asking peer's credits.
+- Abuse limits on the receiving side: one on-chain payment (`txHash`) opens exactly one credit, and a peer can hold at most 16 live credits — further topups are rejected with `CREDIT_CONFLICT` until existing credits are spent.
+- If a topup ends `pending` (peer offline, send failure after the payment), the credit is still recorded locally with its `tx_hash` — the receiver's side is idempotent, so the pending request is safe to let reconciliation retry.
+- Credit state lives in `<dataDir>/apps/postage/state.json`, written by the transport-owning daemon.
+
 ## Recovery
 
 If a connection or conversation feels stuck — messages not landing, a peer that went silent, or two sides that disagree about whether they're connected — the universal fix is:
@@ -732,6 +751,7 @@ The only unrecoverable scenario is simultaneous data loss on both sides with no 
 | `Contact not active yet` | Peer hasn't synced — run `tap message sync` |
 | `Peer not found in contacts` | Connect first or check the name/agent ID |
 | `Grant not found` | The revoke target doesn't exist — check `tap permissions show` |
+| `attention payment required` | The peer enforces paid attention — get a `message/send` grant, or prepay with `tap postage topup <peer> --amount <usdc>` (check `error.data.postage.reason`: `insufficient_credit` means top up again) |
 | `tap remove` blocked | Stop the live transport owner first |
 | `No calendar provider configured` | Run `tap calendar setup --provider google` |
 | `Google Workspace CLI (gws) is not installed` | Install with `npm install -g @googleworkspace/cli` |
