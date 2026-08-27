@@ -802,6 +802,39 @@ Examples:
 			await attentionShowCommand(opts);
 		});
 
+	// postage
+	const postage = program
+		.command("postage")
+		.description("Prepaid postage credits (paid attention)");
+
+	postage
+		.command("topup <peer>")
+		.description("Buy prepaid postage credit at a peer (pays USDC via the daemon)")
+		.requiredOption("--amount <amount>", "Decimal USDC amount to prepay (≤6 decimals)")
+		.option("--wait-ms <ms>", "How long to wait for the peer's credit certificate")
+		.option("--dry-run", "Preview without paying or sending")
+		.option("--yes", "Skip the confirmation prompt")
+		.action(
+			async (
+				peer: string,
+				cmdOpts: { amount: string; waitMs?: string; dryRun?: boolean; yes?: boolean },
+			) => {
+				const opts = program.opts<GlobalOptions>();
+				const { postageTopupCommand } = await import("./commands/postage-topup.js");
+				await postageTopupCommand(peer, cmdOpts, opts);
+			},
+		);
+
+	postage
+		.command("balance")
+		.description("Held and issued postage credits (local read, no transport)")
+		.option("--peer <peer>", "Only credits for this peer (name or agent id)")
+		.action(async (cmdOpts: { peer?: string }) => {
+			const opts = program.opts<GlobalOptions>();
+			const { postageBalanceCommand } = await import("./commands/postage-balance.js");
+			await postageBalanceCommand(cmdOpts, opts);
+		});
+
 	// app
 	const app = program.command("app").description("Manage TAP apps");
 

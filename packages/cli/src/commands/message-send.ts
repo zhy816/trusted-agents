@@ -1,10 +1,14 @@
 import {
 	DEFAULT_MESSAGE_SCOPE,
+	FilePostageLedger,
 	MESSAGE_SEND,
 	type RegistrationFileAttention,
 	ValidationError,
 	findActiveGrantsByScope,
 	findContactForPeer,
+	microsToPostageAmount,
+	postageAmountToMicros,
+	postagePeerKey,
 } from "trusted-agents-core";
 import { loadConfig } from "../lib/config-loader.js";
 import { buildContext } from "../lib/context.js";
@@ -53,6 +57,28 @@ export async function messageSendCommand(
 			const estimatedCost = attention
 				? (attention.pricing[tier] ?? attention.pricing.standard ?? null)
 				: null;
+			// Held postage credits at this peer: what auto-stamping can spend.
+			const peerKey = postagePeerKey({
+				chain: contact.peerChain,
+				agentId: contact.peerAgentId,
+			});
+			const heldCredits = await new FilePostageLedger(config.dataDir).heldFor(peerKey);
+			let postageRemainingMicros = 0n;
+			let maxSingleCreditMicros = 0n;
+			for (const credit of heldCredits) {
+				const remaining = postageAmountToMicros(FilePostageLedger.remainingOf(credit));
+				postageRemainingMicros += remaining;
+				if (remaining > maxSingleCreditMicros) {
+					maxSingleCreditMicros = remaining;
+				}
+			}
+			const postageRemaining = microsToPostageAmount(postageRemainingMicros);
+			// Mirror stampHeld's actual criterion: one single credit must cover
+			// the whole standard price — a fragmented total is not stampable.
+			const wouldStamp =
+				!holdsGrant &&
+				typeof attention?.pricing.standard === "string" &&
+				postageAmountToMicros(attention.pricing.standard) <= maxSingleCreditMicros;
 			success(
 				{
 					status: "preview",
@@ -65,6 +91,8 @@ export async function messageSendCommand(
 					attention_pricing: attention?.pricing ?? null,
 					estimated_tier: attention ? tier : null,
 					estimated_cost: estimatedCost,
+					postage_remaining: postageRemaining,
+					would_stamp: wouldStamp,
 				},
 				opts,
 				startTime,

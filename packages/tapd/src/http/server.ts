@@ -130,6 +130,7 @@ export class TapdHttpServer {
 			if (error instanceof AttentionPaymentRequiredError) {
 				sendError(res, 402, "attention_payment_required", error.message, {
 					attention: error.quote,
+					...(error.postage ? { postage: error.postage } : {}),
 				});
 				return;
 			}

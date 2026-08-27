@@ -28,6 +28,7 @@ import { createMeetingsRoutes } from "./http/routes/meetings.js";
 import { createMessagesRoute } from "./http/routes/messages.js";
 import { createNotificationsRoute } from "./http/routes/notifications.js";
 import { createPendingRoutes } from "./http/routes/pending.js";
+import { createPostageRoutes } from "./http/routes/postage.js";
 import { type TransferExecutor, createTransfersRoute } from "./http/routes/transfers.js";
 import { TapdHttpServer } from "./http/server.js";
 import { handleSseConnection } from "./http/sse.js";
@@ -277,6 +278,9 @@ export class Daemon {
 		router.add("POST", "/api/messages", createMessagesRoute(service));
 		router.add("POST", "/api/connect", createConnectRoute(service));
 		router.add("POST", "/api/funds-requests", createFundsRequestsRoute(service));
+
+		const postage = createPostageRoutes(service);
+		router.add("POST", "/api/postage/topup", postage.topup);
 
 		const meetings = createMeetingsRoutes(service, {
 			calendarProvider: this.options.calendarProvider ?? null,
