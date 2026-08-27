@@ -5,6 +5,7 @@ export const PHASES = {
 	PERMISSIONS: 3,
 	MESSAGING: 4,
 	TRANSFERS: 5,
+	ATTENTION: 6,
 } as const;
 
 export const SCENARIOS = {
@@ -59,4 +60,25 @@ export const SCENARIOS = {
 	SYNC_REJECTION_A: { name: "Sync rejection (Agent A auto-rejects)", phase: PHASES.TRANSFERS },
 	SYNC_REJECTION_RESULT_B: { name: "Sync rejection result (Agent B)", phase: PHASES.TRANSFERS },
 	VERIFY_BALANCE_UNCHANGED: { name: "Verify Agent B balance unchanged", phase: PHASES.TRANSFERS },
+
+	// Phase 6: Attention pricing. Mock-only for now: enforcement is off by
+	// default so live behavior is unchanged, and the live assertions would be
+	// negative ones ("B never logged the message") that are timing-flaky over
+	// real XMTP. Mirror into e2e-live once a funded run can validate them.
+	ATTENTION_DRY_RUN: {
+		name: "Preview message cost with --dry-run (Agent A)",
+		phase: PHASES.ATTENTION,
+	},
+	ATTENTION_ENFORCE_ON: {
+		name: "Enable attention enforcement (Agent B)",
+		phase: PHASES.ATTENTION,
+	},
+	ATTENTION_REJECTED: {
+		name: "Send without grant rejected with quote (A to B)",
+		phase: PHASES.ATTENTION,
+	},
+	ATTENTION_GRANT_EXEMPT: {
+		name: "message/send grant exempts sender (A to B delivers)",
+		phase: PHASES.ATTENTION,
+	},
 } as const;

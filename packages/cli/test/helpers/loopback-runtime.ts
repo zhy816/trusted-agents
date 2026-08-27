@@ -9,6 +9,7 @@ import type {
 	IAgentResolver,
 	ICalendarProvider,
 	ProtocolMessage,
+	RegistrationFileAttention,
 	ResolvedAgent,
 	TransportAck,
 	TransportHandlers,
@@ -24,6 +25,7 @@ interface TestAgentFixture {
 	name: string;
 	description: string;
 	capabilities: string[];
+	attention?: RegistrationFileAttention;
 }
 
 interface LoopbackEnvelope {
@@ -41,6 +43,7 @@ export function createResolvedAgentFixture(fixture: TestAgentFixture): ResolvedA
 		xmtpEndpoint: address,
 		endpoint: undefined,
 		capabilities: fixture.capabilities,
+		attention: fixture.attention,
 		registrationFile: {
 			type: "eip-8004-registration-v1",
 			name: fixture.name,
@@ -50,6 +53,7 @@ export function createResolvedAgentFixture(fixture: TestAgentFixture): ResolvedA
 				version: "1.0",
 				agentAddress: address,
 				capabilities: fixture.capabilities,
+				attention: fixture.attention,
 			},
 		},
 		resolvedAt: "2026-03-06T00:00:00.000Z",

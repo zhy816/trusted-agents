@@ -107,6 +107,18 @@ async function setOwsConfig(
 	await writeFile(configPath, YAML.stringify(yaml), "utf-8");
 }
 
+async function setAttentionConfig(
+	dataDir: string,
+	attention: { enforce?: boolean; pricing?: Record<string, string> },
+): Promise<void> {
+	const configPath = join(dataDir, "config.yaml");
+	const { default: YAML } = await import("yaml");
+	const content = await readFile(configPath, "utf-8");
+	const yaml = YAML.parse(content) as Record<string, unknown>;
+	yaml.attention = attention;
+	await writeFile(configPath, YAML.stringify(yaml), "utf-8");
+}
+
 async function waitForPermissionsMock(
 	dataDir: string,
 	peer: string,
@@ -168,6 +180,14 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 				name: AGENT_B_NAME,
 				description: "Loopback E2E agent B",
 				capabilities: ["general-chat", "payments"],
+				// Phase 6 exercises attention pricing: B advertises a price list
+				// so A's dry-run can quote it and A's sends wait for receipts.
+				attention: {
+					version: "1.0",
+					currency: "USDC",
+					chain: CHAIN,
+					pricing: { grantHolder: "0", standard: "0.001" },
+				},
 			}),
 		]);
 
@@ -648,6 +668,109 @@ describe("TAP mocked E2E — loopback transport + static resolver", { timeout: 2
 			clearCliRuntimeOverride(pendingDir);
 			await rm(pendingRoot, { recursive: true, force: true });
 		}
+	});
+
+	// ── Phase 6: Attention pricing ────────────────────────────────────────────
+
+	describe("Phase 6: Attention pricing", () => {
+		it(SCENARIOS.ATTENTION_DRY_RUN.name, async () => {
+			const result = await runCli([
+				"--json",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"cost preview",
+				"--dry-run",
+			]);
+			expect(result.exitCode, `dry-run failed:\n${result.stderr}`).toBe(0);
+
+			const data = parseJsonOutput(result.stdout).data as {
+				dry_run: boolean;
+				attention_currency: string | null;
+				attention_pricing: Record<string, string> | null;
+				estimated_tier: string | null;
+				estimated_cost: string | null;
+			};
+			expect(data.dry_run).toBe(true);
+			expect(data.attention_currency).toBe("USDC");
+			expect(data.attention_pricing).toEqual({ grantHolder: "0", standard: "0.001" });
+			expect(data.estimated_tier).toBe("standard");
+			expect(data.estimated_cost).toBe("0.001");
+		});
+
+		it(SCENARIOS.ATTENTION_ENFORCE_ON.name, async () => {
+			// The daemon reads config at startup, so flipping enforcement means
+			// restarting Agent B's in-process tapd.
+			await setAttentionConfig(agentBDir, {
+				enforce: true,
+				pricing: { grantHolder: "0", standard: "0.001" },
+			});
+			await agentBTapd?.stop();
+			agentBTapd = await startInProcessTapd({
+				dataDir: agentBDir,
+				identityAgentId: AGENT_B_ID,
+			});
+			expect(agentBTapd.port).toBeGreaterThan(0);
+		});
+
+		it(SCENARIOS.ATTENTION_REJECTED.name, async () => {
+			const result = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"unpaid ping",
+			]);
+			expect(result.exitCode, "un-granted send must be rejected").not.toBe(0);
+			expect(`${result.stdout}\n${result.stderr}`).toContain("attention payment required");
+
+			// The rejected message never reached Agent B's conversation log.
+			const conversations = await runCli([
+				"--json",
+				"--data-dir",
+				agentBDir,
+				"conversations",
+				"list",
+				"--with",
+				AGENT_A_NAME,
+			]);
+			expect(conversations.stdout).not.toContain("unpaid ping");
+		});
+
+		it(SCENARIOS.ATTENTION_GRANT_EXEMPT.name, async () => {
+			const grantFilePath = await writeGrantFile(agentBDir, "message-grant.json", [
+				{ grantId: "e2e-message-send", scope: "message/send" },
+			]);
+			const grant = await runCli([
+				"--plain",
+				"--data-dir",
+				agentBDir,
+				"permissions",
+				"grant",
+				AGENT_A_NAME,
+				"--file",
+				grantFilePath,
+				"--note",
+				"e2e attention exemption",
+			]);
+			expect(grant.exitCode, `Agent B message/send grant failed:\n${grant.stderr}`).toBe(0);
+
+			const result = await runCli([
+				"--plain",
+				"--data-dir",
+				agentADir,
+				"message",
+				"send",
+				AGENT_B_NAME,
+				"granted ping",
+			]);
+			expect(result.exitCode, `granted send failed:\n${result.stderr}`).toBe(0);
+			expect(result.stdout).toContain("Sent:      true");
+		});
 	});
 
 	// ═══════════════════════════════════════════════════════
