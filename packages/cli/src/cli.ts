@@ -598,10 +598,14 @@ Examples:
 		.command("send <peer> <text>")
 		.description("Send message to connected peer")
 		.option("--scope <scope>", "Semantic message scope", "general-chat")
-		.action(async (peer: string, text: string, cmdOpts: { scope?: string }) => {
+		.option(
+			"--dry-run",
+			"Preview the message and the peer's advertised attention cost without sending",
+		)
+		.action(async (peer: string, text: string, cmdOpts: { scope?: string; dryRun?: boolean }) => {
 			const opts = program.opts<GlobalOptions>();
 			const { messageSendCommand } = await import("./commands/message-send.js");
-			await messageSendCommand(peer, text, opts, { scope: cmdOpts.scope });
+			await messageSendCommand(peer, text, opts, { scope: cmdOpts.scope, dryRun: cmdOpts.dryRun });
 		});
 
 	message
