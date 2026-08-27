@@ -50,6 +50,7 @@ export function classifyEventToNotification(event: TapEvent): TapNotification | 
 					connectionId: event.peer.connectionId,
 					peerAgentId: event.peer.peerAgentId,
 					peerName: event.peer.peerName,
+					peerChain: event.peer.peerChain,
 				},
 				{ key: `msg:${event.peer.connectionId}`, strategy: "count" },
 			);
@@ -57,6 +58,7 @@ export function classifyEventToNotification(event: TapEvent): TapNotification | 
 			return note("info", `Connection established with ${event.peer.peerName || "peer"}`, {
 				connectionId: event.connectionId,
 				peerAgentId: event.peer.peerAgentId,
+				peerChain: event.peer.peerChain,
 			});
 		case "connection.failed":
 			return note("escalation", `Connection request ${event.requestId} failed: ${event.error}`, {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TapEvent } from "trusted-agents-core";
@@ -251,5 +251,27 @@ describe("Daemon → NotificationQueue wiring", () => {
 		const pending = body.notifications.find((n) => n.type === "escalation");
 		expect(pending?.oneLiner).toContain("req-42");
 		expect(body.notifications.filter((n) => n.count === 2)).toHaveLength(2);
+	});
+
+	it("records drain accounting into <dataDir>/attention-ledger.json", async () => {
+		service.hooks.onTypedEvent?.(messageEvent(1, "conn-1", "first"));
+		service.hooks.onTypedEvent?.(messageEvent(2, "conn-1", "second"));
+		await drain();
+
+		const raw = JSON.parse(await readFile(join(dataDir, "attention-ledger.json"), "utf-8")) as {
+			version: number;
+			identity?: { chain: string; agentId: number };
+			days: Record<
+				string,
+				{ peers: Record<string, { notificationsRendered: number; tokensInjected: number }> }
+			>;
+		};
+		expect(raw.version).toBe(1);
+		expect(raw.identity).toEqual({ chain: "eip155:8453", agentId: 42 });
+		const days = Object.values(raw.days);
+		expect(days).toHaveLength(1);
+		const peer = days[0]?.peers["eip155:8453#99"];
+		expect(peer?.notificationsRendered).toBe(1);
+		expect(peer?.tokensInjected).toBeGreaterThan(0);
 	});
 });

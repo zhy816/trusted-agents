@@ -78,6 +78,7 @@ describe("classifyEventToNotification", () => {
 		expect(note?.coalesceStrategy).toBe("count");
 		expect(note?.data?.peerName).toBe("Bob");
 		expect(note?.data?.connectionId).toBe("conn-1");
+		expect(note?.data?.peerChain).toBe("eip155:8453");
 	});
 
 	it("truncates long message text", () => {
