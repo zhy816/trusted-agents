@@ -9,8 +9,8 @@
 // Run from the repo root: bun scripts/demo-notification-flood.ts
 
 import type { TapEvent } from "../packages/core/src/runtime/event-types.ts";
-import { formatNotificationLines } from "../packages/openclaw-plugin/src/notifications-drain.ts";
 import { classifyEventToNotification } from "../packages/tapd/src/notification-classifier.ts";
+import { formatNotificationLines } from "../packages/tapd/src/notification-format.ts";
 import {
 	NotificationQueue,
 	type TapNotification,
