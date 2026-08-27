@@ -12,3 +12,4 @@ export * from "./scheduling/index.js";
 export * from "./signing/index.js";
 export * from "./app/index.js";
 export * from "./attention/index.js";
+export * from "./postage/index.js";

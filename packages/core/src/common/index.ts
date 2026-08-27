@@ -11,6 +11,8 @@ export {
 	AttentionPaymentRequiredError,
 	ATTENTION_PAYMENT_REQUIRED_CODE,
 	type AttentionQuote,
+	type PostageRejection,
+	type PostageRejectionReason,
 	toErrorMessage,
 	fsErrorCode,
 } from "./errors.js";
