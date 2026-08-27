@@ -60,6 +60,34 @@ describe("attention config", () => {
 		).not.toThrow();
 	});
 
+	it("validateConfig requires the priority price to exceed standard", () => {
+		const base = {
+			agentId: 1,
+			chain: "eip155:8453",
+			ows: { wallet: "w", apiKey: "ows_key_x" },
+		} as const;
+		// priority <= standard would classify every standard-paid message as
+		// a wake-up and disable coalescing for all paid mail.
+		expect(() =>
+			validateConfig({
+				...base,
+				attention: { pricing: { standard: "0.001", priority: "0.001" } },
+			}),
+		).toThrow("must exceed");
+		expect(() =>
+			validateConfig({
+				...base,
+				attention: { pricing: { standard: "0.001", priority: "0.0005" } },
+			}),
+		).toThrow("must exceed");
+		expect(() =>
+			validateConfig({
+				...base,
+				attention: { pricing: { standard: "0.001", priority: "0.01" } },
+			}),
+		).not.toThrow();
+	});
+
 	it("validateConfig rejects non-decimal pricing values and non-boolean enforce", () => {
 		expect(() =>
 			validateConfig({

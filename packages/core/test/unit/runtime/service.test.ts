@@ -4911,4 +4911,381 @@ describe("postage", () => {
 			await service.stop();
 		}
 	});
+
+	describe("priority tiers (paid wake-ups)", () => {
+		const PRIORITY_CONFIG = {
+			attention: {
+				enforce: true,
+				pricing: { grantHolder: "0", standard: "0.001", priority: "0.01" },
+			},
+		};
+		const PRIORITY_PRICED_PEER: ResolvedAgent = {
+			...PEER_AGENT,
+			attention: {
+				version: "1.0",
+				currency: "USDC",
+				pricing: { standard: "0.001", priority: "0.01" },
+			},
+		};
+
+		function collectMessageEvents(): {
+			events: Array<{ postage?: { tier: string; cost: string } }>;
+			hooks: { onTypedEvent: (event: { type: string }) => void };
+		} {
+			const events: Array<{ postage?: { tier: string; cost: string } }> = [];
+			return {
+				events,
+				hooks: {
+					onTypedEvent: (event) => {
+						if (event.type === "message.received") {
+							events.push(event as (typeof events)[number]);
+						}
+					},
+				},
+			};
+		}
+
+		it("marks the paid tier on the message.received event", async () => {
+			const contact = makeActiveContact("conn-prio-1");
+			const { events, hooks } = collectMessageEvents();
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					configOverrides: PRIORITY_CONFIG,
+					hooks,
+				},
+			);
+			await service.start();
+			try {
+				await seedIssuedCredit(dataDir, { amount: "0.05" });
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message: stampedMessage(contact, { creditId: "credit-1", seq: 1, cost: "0.001" }),
+					}),
+				).resolves.toEqual({ status: "received" });
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message: stampedMessage(
+							contact,
+							{ creditId: "credit-1", seq: 2, cost: "0.01" },
+							"urgent",
+						),
+					}),
+				).resolves.toEqual({ status: "received" });
+				expect(events).toHaveLength(2);
+				expect(events[0]?.postage).toEqual({ tier: "standard", cost: "0.001" });
+				expect(events[1]?.postage).toEqual({ tier: "priority", cost: "0.01" });
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("charges grant holders for priority stamps — the grant buys delivery, not the wake-up", async () => {
+			const contact = makeActiveContact("conn-prio-2");
+			contact.permissions.grantedByMe = createGrantSet(
+				[{ grantId: "grant-msg-1", scope: "message/send" }],
+				"2026-03-08T00:00:00.000Z",
+			);
+			const { events, hooks } = collectMessageEvents();
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					configOverrides: PRIORITY_CONFIG,
+					hooks,
+				},
+			);
+			await service.start();
+			try {
+				await seedIssuedCredit(dataDir, { amount: "0.05" });
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message: stampedMessage(contact, { creditId: "credit-1", seq: 1, cost: "0.01" }),
+					}),
+				).resolves.toEqual({ status: "received" });
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.issued["credit-1"]).toMatchObject({ spent: "0.01", lastSeq: 1 });
+				expect(events[0]?.postage).toEqual({ tier: "priority", cost: "0.01" });
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("degrades a grant holder's bad priority stamp to plain grant delivery", async () => {
+			const contact = makeActiveContact("conn-prio-3");
+			contact.permissions.grantedByMe = createGrantSet(
+				[{ grantId: "grant-msg-1", scope: "message/send" }],
+				"2026-03-08T00:00:00.000Z",
+			);
+			const { events, hooks } = collectMessageEvents();
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					configOverrides: PRIORITY_CONFIG,
+					hooks,
+				},
+			);
+			await service.start();
+			try {
+				// Unknown credit: the stamp cannot be charged, but a grant
+				// holder is never rejected — the message lands without a wake.
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message: stampedMessage(contact, { creditId: "ghost", seq: 1, cost: "0.01" }),
+					}),
+				).resolves.toEqual({ status: "received" });
+				expect(events[0]?.postage).toBeUndefined();
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.issued).toEqual({});
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("does not charge grant holders for standard-value stamps", async () => {
+			const contact = makeActiveContact("conn-prio-4");
+			contact.permissions.grantedByMe = createGrantSet(
+				[{ grantId: "grant-msg-1", scope: "message/send" }],
+				"2026-03-08T00:00:00.000Z",
+			);
+			const { events, hooks } = collectMessageEvents();
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					configOverrides: PRIORITY_CONFIG,
+					hooks,
+				},
+			);
+			await service.start();
+			try {
+				await seedIssuedCredit(dataDir, { amount: "0.05" });
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message: stampedMessage(contact, { creditId: "credit-1", seq: 1, cost: "0.001" }),
+					}),
+				).resolves.toEqual({ status: "received" });
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.issued["credit-1"]).toMatchObject({ spent: "0", lastSeq: 0 });
+				expect(events[0]?.postage).toBeUndefined();
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("priority sends pay the peer's priority price even while holding a grant", async () => {
+			const contact = makeActiveContact("conn-prio-5");
+			contact.permissions.grantedByPeer = createGrantSet(
+				[{ grantId: "grant-msg-2", scope: "message/send" }],
+				"2026-03-08T00:00:00.000Z",
+			);
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					resolver: createStaticResolver(PRIORITY_PRICED_PEER),
+				},
+			);
+			await service.start();
+			try {
+				await new FilePostageLedger(dataDir).recordHeld({
+					creditId: "held-1",
+					peer: PEER_KEY,
+					amount: "0.05",
+					txHash: "0xseed",
+				});
+				await service.sendMessage("Bob", "wake up", undefined, { priority: true });
+				expect(sentMetadata(transport.sentMessages[0]!)?.postage).toEqual({
+					creditId: "held-1",
+					seq: 1,
+					cost: "0.01",
+				});
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.held["held-1"]?.spent).toBe("0.01");
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("does not stamp an un-granted priority send when the peer has no standard price", async () => {
+			const contact = makeActiveContact("conn-prio-7");
+			// Priority-only pricing: this receiver admits un-granted mail
+			// never, so stamping would burn the credit on a doomed message.
+			const priorityOnlyPeer: ResolvedAgent = {
+				...PEER_AGENT,
+				attention: { version: "1.0", currency: "USDC", pricing: { priority: "0.01" } },
+			};
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					resolver: createStaticResolver(priorityOnlyPeer),
+				},
+			);
+			await service.start();
+			try {
+				await new FilePostageLedger(dataDir).recordHeld({
+					creditId: "held-1",
+					peer: PEER_KEY,
+					amount: "0.05",
+					txHash: "0xseed",
+				});
+				await service.sendMessage("Bob", "urgent into the void", undefined, { priority: true });
+				expect(sentMetadata(transport.sentMessages[0]!)?.postage).toBeUndefined();
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.held["held-1"]?.spent).toBe("0");
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("priority sends bypass the pricing cache; normal sends use it", async () => {
+			const contact = makeActiveContact("conn-prio-8");
+			const maxAges: Array<number | undefined> = [];
+			const resolver: IAgentResolver = {
+				resolve: async () => PRIORITY_PRICED_PEER,
+				resolveWithCache: async (_agentId, _chain, maxAgeMs) => {
+					maxAges.push(maxAgeMs);
+					return PRIORITY_PRICED_PEER;
+				},
+			};
+			const { service, dataDir } = await createService(
+				{},
+				{ trustStore: createMemoryTrustStore([contact]), resolver },
+			);
+			await service.start();
+			try {
+				await new FilePostageLedger(dataDir).recordHeld({
+					creditId: "held-1",
+					peer: PEER_KEY,
+					amount: "0.05",
+					txHash: "0xseed",
+				});
+				await service.sendMessage("Bob", "urgent", undefined, { priority: true });
+				await service.sendMessage("Bob", "calm");
+				// A stale cached priority price would debit the credit for a
+				// wake-up the receiver no longer sells at that price.
+				expect(maxAges[0]).toBe(0);
+				expect(maxAges[1]).toBe(60_000);
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("charges an over-standard, under-priority stamp in full at standard tier", async () => {
+			const contact = makeActiveContact("conn-prio-9");
+			const { events, hooks } = collectMessageEvents();
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					configOverrides: PRIORITY_CONFIG,
+					hooks,
+				},
+			);
+			await service.start();
+			try {
+				await seedIssuedCredit(dataDir, { amount: "0.05" });
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message: stampedMessage(contact, { creditId: "credit-1", seq: 1, cost: "0.005" }),
+					}),
+				).resolves.toEqual({ status: "received" });
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.issued["credit-1"]?.spent).toBe("0.005");
+				expect(events[0]?.postage).toEqual({ tier: "standard", cost: "0.005" });
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("re-emits the purchased event when a paid message is redelivered in the crash window", async () => {
+			const contact = makeActiveContact("conn-prio-10");
+			const { events, hooks } = collectMessageEvents();
+			const { service, transport, requestJournal, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					configOverrides: PRIORITY_CONFIG,
+					hooks,
+				},
+			);
+			await service.start();
+			try {
+				await seedIssuedCredit(dataDir, { amount: "0.05" });
+				const message = stampedMessage(contact, { creditId: "credit-1", seq: 1, cost: "0.01" });
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message,
+					}),
+				).resolves.toEqual({ status: "received" });
+				// Crash between the persisted debit and the journal completing:
+				// the redelivery must re-emit the event the stamp paid for —
+				// the charge stands, so the wake-up must not be lost.
+				await requestJournal.updateStatus(String(message.id), "pending");
+				await expect(
+					transport.handlers.onRequest?.({
+						from: contact.peerAgentId,
+						senderInboxId: "peer-inbox-prio",
+						message,
+					}),
+				).resolves.toEqual({ status: "duplicate" });
+				expect(events).toHaveLength(2);
+				expect(events[1]?.postage).toEqual({ tier: "priority", cost: "0.01" });
+				// Still charged exactly once.
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.issued["credit-1"]?.spent).toBe("0.01");
+			} finally {
+				await service.stop();
+			}
+		});
+
+		it("priority falls back to normal treatment when the peer has no priority price", async () => {
+			const contact = makeActiveContact("conn-prio-6");
+			contact.permissions.grantedByPeer = createGrantSet(
+				[{ grantId: "grant-msg-2", scope: "message/send" }],
+				"2026-03-08T00:00:00.000Z",
+			);
+			const { service, transport, dataDir } = await createService(
+				{},
+				{
+					trustStore: createMemoryTrustStore([contact]),
+					resolver: createStaticResolver(PRICED_PEER),
+				},
+			);
+			await service.start();
+			try {
+				await new FilePostageLedger(dataDir).recordHeld({
+					creditId: "held-1",
+					peer: PEER_KEY,
+					amount: "0.05",
+					txHash: "0xseed",
+				});
+				await service.sendMessage("Bob", "wake up please", undefined, { priority: true });
+				// No priority tier advertised: the grant's free ride wins and
+				// nothing is stamped.
+				expect(sentMetadata(transport.sentMessages[0]!)?.postage).toBeUndefined();
+				const state = await new FilePostageLedger(dataDir).read();
+				expect(state.held["held-1"]?.spent).toBe("0");
+			} finally {
+				await service.stop();
+			}
+		});
+	});
 });
