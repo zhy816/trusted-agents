@@ -174,6 +174,20 @@ class HermesIdentityResolutionTests(unittest.TestCase):
         self.assertEqual(body["peer"], "bob")
         self.assertEqual(body["text"], "hi")
 
+    def test_send_message_forwards_priority_flag(self) -> None:
+        # Paid wake-ups: the priority flag must reach tapd's /api/messages
+        # body (and stay absent when the caller does not pass it).
+        self._write_config([{"name": "only", "dataDir": self._primary_dir}])
+        client.send_request(
+            "send_message",
+            {"peer": "bob", "text": "urgent", "priority": True, "identity": "only"},
+        )
+        body = self._captured[-1]["body"]
+        self.assertEqual(body["priority"], True)
+
+        client.send_request("send_message", {"peer": "bob", "text": "calm", "identity": "only"})
+        self.assertNotIn("priority", self._captured[-1]["body"])
+
 
 class HermesDrainAllIdentitiesTests(unittest.TestCase):
     """Tests for multi-identity notification drain (residual 1).

@@ -244,6 +244,7 @@ export class TapdClient {
 		peer: string;
 		text: string;
 		scope?: string;
+		priority?: boolean;
 	}): Promise<TapSendMessageResult> {
 		return this.post<TapSendMessageResult>("/api/messages", input);
 	}

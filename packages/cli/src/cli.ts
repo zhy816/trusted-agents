@@ -599,14 +599,28 @@ Examples:
 		.description("Send message to connected peer")
 		.option("--scope <scope>", "Semantic message scope", "general-chat")
 		.option(
+			"--priority",
+			"Pay the peer's priority attention price so the message escalates and may wake their agent",
+		)
+		.option(
 			"--dry-run",
 			"Preview the message and the peer's advertised attention cost without sending",
 		)
-		.action(async (peer: string, text: string, cmdOpts: { scope?: string; dryRun?: boolean }) => {
-			const opts = program.opts<GlobalOptions>();
-			const { messageSendCommand } = await import("./commands/message-send.js");
-			await messageSendCommand(peer, text, opts, { scope: cmdOpts.scope, dryRun: cmdOpts.dryRun });
-		});
+		.action(
+			async (
+				peer: string,
+				text: string,
+				cmdOpts: { scope?: string; dryRun?: boolean; priority?: boolean },
+			) => {
+				const opts = program.opts<GlobalOptions>();
+				const { messageSendCommand } = await import("./commands/message-send.js");
+				await messageSendCommand(peer, text, opts, {
+					scope: cmdOpts.scope,
+					dryRun: cmdOpts.dryRun,
+					priority: cmdOpts.priority,
+				});
+			},
+		);
 
 	message
 		.command("request-funds <peer>")

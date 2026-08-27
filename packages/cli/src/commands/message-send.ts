@@ -21,13 +21,14 @@ export async function messageSendCommand(
 	peer: string,
 	text: string,
 	opts: GlobalOptions,
-	cmdOpts?: { scope?: string; dryRun?: boolean },
+	cmdOpts?: { scope?: string; dryRun?: boolean; priority?: boolean },
 ): Promise<void> {
 	const startTime = Date.now();
 
 	try {
 		const config = await loadConfig(opts);
 		const scope = cmdOpts?.scope?.trim() || DEFAULT_MESSAGE_SCOPE;
+		const priority = cmdOpts?.priority === true;
 
 		if (cmdOpts?.dryRun) {
 			// Pure local preview: contact from the trust store, price list from
@@ -50,10 +51,13 @@ export async function messageSendCommand(
 				// Resolution failure just means the price is unknown; the
 				// preview still shows the message that would be sent.
 			}
-			// My tier at THEIR gate: grants the peer issued to me.
+			// My tier at THEIR gate: grants the peer issued to me. A priority
+			// send pays the priority price even for grant holders — the grant
+			// buys delivery, the stamp buys the wake-up.
 			const holdsGrant =
 				findActiveGrantsByScope(contact.permissions.grantedByPeer, MESSAGE_SEND).length > 0;
-			const tier = holdsGrant ? "grantHolder" : "standard";
+			const priorityAvailable = priority && typeof attention?.pricing.priority === "string";
+			const tier = priorityAvailable ? "priority" : holdsGrant ? "grantHolder" : "standard";
 			const estimatedCost = attention
 				? (attention.pricing[tier] ?? attention.pricing.standard ?? null)
 				: null;
@@ -74,11 +78,16 @@ export async function messageSendCommand(
 			}
 			const postageRemaining = microsToPostageAmount(postageRemainingMicros);
 			// Mirror stampHeld's actual criterion: one single credit must cover
-			// the whole standard price — a fragmented total is not stampable.
+			// the whole price of the tier being stamped — a fragmented total
+			// is not stampable.
+			const stampPrice = priorityAvailable
+				? (attention?.pricing.priority ?? null)
+				: !holdsGrant && typeof attention?.pricing.standard === "string"
+					? attention.pricing.standard
+					: null;
 			const wouldStamp =
-				!holdsGrant &&
-				typeof attention?.pricing.standard === "string" &&
-				postageAmountToMicros(attention.pricing.standard) <= maxSingleCreditMicros;
+				typeof stampPrice === "string" &&
+				postageAmountToMicros(stampPrice) <= maxSingleCreditMicros;
 			success(
 				{
 					status: "preview",
@@ -86,6 +95,7 @@ export async function messageSendCommand(
 					peer: contact.peerDisplayName,
 					agent_id: contact.peerAgentId,
 					scope,
+					priority,
 					text_chars: text.length,
 					attention_currency: attention?.currency ?? null,
 					attention_pricing: attention?.pricing ?? null,
@@ -103,7 +113,12 @@ export async function messageSendCommand(
 		const client = await TapdClient.forDataDir(config.dataDir);
 		verbose(`Sending message to ${peer}...`, opts);
 
-		const result = await client.sendMessage({ peer, text, scope });
+		const result = await client.sendMessage({
+			peer,
+			text,
+			scope,
+			...(priority ? { priority: true } : {}),
+		});
 
 		success(
 			{
