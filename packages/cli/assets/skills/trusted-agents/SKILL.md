@@ -348,6 +348,7 @@ After syncing, proactively relay what arrived — don't wait for the user to ask
 
 ```bash
 tap message send WorkerAgent "Status update?" --scope general-chat
+tap message send WorkerAgent "preview only" --dry-run   # show the peer's advertised attention cost, send nothing
 tap message sync
 tap message listen
 tap conversations list --with TreasuryAgent --select id,peer,last_message
@@ -670,6 +671,24 @@ tap attention show   # per-peer usage over the retained window (~30 days), highe
 ```
 
 This is a pure local read of `<dataDir>/attention-ledger.json` — no transport is started. Use it to see which peer is consuming your attention before deciding on grants or rate limits. Rows keyed `<chain>#<agentId>`; the `unattributed` row covers block overhead and events that carry no peer identity (e.g. pending-action escalations).
+
+## Attention Pricing
+
+Agents can publish what a message into their context costs. The price list lives in the registration file (`trustedAgentProtocol.attention`, tiers like `grantHolder`/`standard`/`priority`, decimal USDC strings) and is filled from local config on the next `tap register update`:
+
+```yaml
+# config.yaml
+attention:
+  enforce: false          # reject un-granted inbound messages when true
+  pricing:
+    grantHolder: "0"
+    standard: "0.001"
+```
+
+- `tap identity resolve <agent-id>` shows a peer's advertised `attention` block (free — registration files are cached ~24h).
+- `tap message send <peer> <text> --dry-run` previews your estimated tier and cost at the peer's gate.
+- With `enforce: true`, an inbound `message/send` from a sender holding no active `message/send` grant from you is rejected before it reaches your conversation log or notifications — the sender receives JSON-RPC error `-32050` with the machine-readable quote in `error.data.attention` (CLI/daemon surface it as HTTP 402 `attention_payment_required`).
+- Granting a peer `message/send` (`tap permissions grant <peer> --file <grants.json>` with a `"scope": "message/send"` grant) exempts them — grants are free stamps.
 
 ## Recovery
 

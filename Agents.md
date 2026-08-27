@@ -224,6 +224,7 @@ File: `packages/core/src/identity/registration-file.ts`
 - Non-XMTP services must use `https:` URLs
 - `trustedAgentProtocol.agentAddress` must be a valid Ethereum address
 - `xmtp.endpoint` must match `trustedAgentProtocol.agentAddress` (case-insensitive)
+- `trustedAgentProtocol.attention` is optional (absent = no pricing); when present it needs a non-empty `version` and `currency` and a `pricing` object whose values are decimal amount strings (≤6 decimals). Tier names are open — validate values, not names.
 
 ### URI safety rules during registration fetch
 File: `packages/core/src/identity/registration-file.ts`
