@@ -4,11 +4,10 @@
 
 This evaluation focuses on validating whether the current TAP paid-attention and postage mechanisms can reduce unnecessary LLM attention consumption and limit low-value message flooding while preserving important messages.
 
-The evaluation covers three questions:
+The evaluation covers two questions:
 
 1. Can notification coalescing reduce the amount of notification context injected into the receiver's LLM prompt?
 2. Can prepaid postage create an economic limit on repeated message delivery?
-3. Can priority messages remain visible even when ordinary notifications are limited by quota rules?
 
 ---
 
@@ -27,8 +26,6 @@ Main components evaluated:
 - attention-related notification reduction;
 - prepaid postage credit;
 - postage debit and balance exhaustion;
-- weekly notification quota;
-- priority escalation behavior.
 
 The project was built successfully on Windows after minor local compatibility fixes to TypeScript typing and build scripts.
 
@@ -152,62 +149,10 @@ The result also demonstrates the advantage of the prepaid model:
 
 The sender does not need to perform a separate payment transaction for every individual message.
 
----
 
-## 5. Experiment 3 — Priority Messages and Notification Quota
+## 5. Overall Findings
 
-### 5.1 Objective
-
-The third evaluation examines the relationship between weekly notification quotas and priority messages.
-
-The implemented TAP logic allows a `message/send` grant to define a constraint such as:
-
-`notificationsPerWeek`
-
-When a grant holder reaches the weekly notification quota, ordinary information notifications are folded into a summary.
-
-However, escalation notifications are intentionally excluded from quota folding.
-
-This includes:
-
-- priority messages;
-- pending approvals;
-- other escalation events.
-
-### 5.2 Implemented Behavior
-
-The current implementation follows the rule:
-
-- ordinary `info` notifications may be folded after the weekly quota is reached;
-- the folded notifications are replaced by a single summary notification;
-- escalation notifications are not folded;
-- paid priority messages can therefore remain visible even after the ordinary notification quota has been exhausted.
-
-The existing Phase 8 test flow also checks that a grant holder whose normal notification quota is exhausted can still send a priority message that appears as an escalation.
-
-### 5.3 Local Execution Limitation
-
-A direct local execution of the priority/quota benchmark was attempted.
-
-However, the current Windows environment could not load the native OWS dependency:
-
-`@silicon-intern/ows-core-win32-x64-msvc`
-
-The package is not available in the current dependency setup.
-
-Therefore, this experiment is documented based on:
-
-- the implemented quota logic;
-- the existing Phase 8 test scenarios;
-- source-level validation of escalation-preservation behavior.
-
-The local Windows dependency issue is an environment limitation rather than a logic failure in the quota mechanism.
-
----
-
-## 6. Overall Findings
-
-The evaluation supports three main findings.
+The evaluation supports two main findings.
 
 ### Finding 1 — Notification coalescing reduces LLM attention cost
 
@@ -223,15 +168,9 @@ Once the sender's credit is exhausted, additional paid-attention messages are re
 
 This introduces a direct economic cost for repeated message delivery.
 
-### Finding 3 — Important messages are preserved
 
-The notification architecture prioritizes escalations over ordinary chatter.
 
-Priority messages and other escalation events are designed to remain visible even when ordinary notifications are coalesced or quota-folded.
-
----
-
-## 7. Limitations
+## 6. Limitations
 
 This evaluation has several limitations.
 
@@ -239,7 +178,7 @@ First, the notification token measurement uses the project's simple `characters 
 
 Second, the experiments are local and synthetic rather than based on large-scale real-world agent traffic.
 
-Third, the complete live Phase 6–8 E2E flow was not executed in the current Windows environment because of native dependency limitations related to OWS.
+Third, the complete live Phase 6–8 E2E flow was not included in this local quantitative evaluation because of native dependency limitations related to OWS in the current Windows environment.
 
 Fourth, the economic experiments validate postage ledger behavior but do not measure real blockchain settlement latency or transaction cost.
 
